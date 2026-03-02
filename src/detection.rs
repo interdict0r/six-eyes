@@ -8,12 +8,10 @@ pub struct RichHeaderInfo {
     pub entries: Vec<(u16, u16, u32)>,
 }
 
-/// Parse the Rich header — returns structured info including RichHash (MD5 of XOR-decoded bytes).
 pub fn parse_rich_header(data: &[u8]) -> Option<RichHeaderInfo> {
     let pos = data.windows(4).position(|w| w == b"Rich")?;
     if pos + 8 > data.len() { return None; }
     let base = data.as_ptr();
-    // SAFETY: pos + 8 <= data.len() verified above
     let key = unsafe { std::ptr::read_unaligned(base.add(pos + 4) as *const u32) };
     let key = u32::from_le(key);
     let dans_enc = key ^ 0x536E6144;
@@ -32,7 +30,6 @@ pub fn parse_rich_header(data: &[u8]) -> Option<RichHeaderInfo> {
     }
     if entries.is_empty() { return None; }
 
-    // RichHash: MD5 of XOR-decoded bytes from DanS to Rich (exclusive)
     let decoded_len = pos - start;
     let mut decoded = Vec::with_capacity(decoded_len);
     let key_bytes = key.to_le_bytes();
@@ -71,27 +68,21 @@ pub fn dll_char_tooltip(flag: &str) -> &'static str {
     }
 }
 
-/// Detect the source language of a PE binary.
-/// Uses `eq_ignore_ascii_case` for DLL name checks to avoid heap-allocating
-/// lowercased copies. Section names go into a HashSet for O(1) lookup.
 pub fn detect_language(pe: &PeInfo, buffer: &[u8]) -> Option<String> {
     let all_fns: HashSet<&str> = pe.imports.iter()
         .flat_map(|i| i.functions.iter().map(|s| s.as_str())).collect();
     let sec_names: HashSet<&str> = pe.sections.iter().map(|s| s.name.as_str()).collect();
 
-    /// Case-insensitive DLL name check without allocation.
     #[inline]
     fn has_dll(pe: &PeInfo, name: &str) -> bool {
         pe.imports.iter().any(|i| i.dll.eq_ignore_ascii_case(name))
     }
 
-    // .NET — very reliable: specific DLL + entry point
     if has_dll(pe, "mscoree.dll")
         && (all_fns.contains("_CorExeMain") || all_fns.contains("_CorDllMain")) {
         return Some(".NET (CLR)".into());
     }
 
-    // Go — require strong evidence
     {
         let has_go_strings = pe.strings.iter().any(|s|
             s.value.contains("runtime.main")
@@ -105,14 +96,12 @@ pub fn detect_language(pe: &PeInfo, buffer: &[u8]) -> Option<String> {
         }
     }
 
-    // Rust — path fragments unique to the Rust toolchain
     if pe.strings.iter().any(|s|
         s.value.contains("/rustc/") || s.value.contains(".cargo/registry") || s.value.contains("core::panicking")
     ) {
         return Some("Rust".into());
     }
 
-    // Delphi/Borland — classic section name triple
     if sec_names.contains("CODE") && sec_names.contains("DATA") && sec_names.contains("BSS") {
         return Some("Delphi/Borland".into());
     }
@@ -143,10 +132,6 @@ pub fn detect_language(pe: &PeInfo, buffer: &[u8]) -> Option<String> {
     None
 }
 
-/// Validate that buffer contains a real Go pclntab header, not just the 4-byte magic.
-/// Full header layout: [magic:4][0x00:2][quantum:1][ptrsize:1]
-/// Uses `ptr::read_unaligned` for fast 4-byte magic comparison and raw pointer
-/// reads for the remaining header fields.
 fn validate_pclntab(buffer: &[u8]) -> bool {
     const MAGICS: [u32; 4] = [
         u32::from_le_bytes([0xFB, 0xFF, 0xFF, 0xFF]),
@@ -193,7 +178,6 @@ pub fn parse_go_pclntab(buffer: &[u8]) -> Option<GoInfo> {
         let mut pos = 0usize;
         let search_end = buf_len - 7;
         while pos < search_end {
-            // SAFETY: pos + 7 < buf_len
             let word = unsafe { std::ptr::read_unaligned(base.add(pos) as *const u32) };
             if word != magic { pos += 1; continue; }
 
@@ -207,10 +191,8 @@ pub fn parse_go_pclntab(buffer: &[u8]) -> Option<GoInfo> {
             let mut source_files = Vec::new();
             let mut seen = HashSet::new();
 
-            // Raw pointer byte scan — avoids per-byte bounds checks
             let mut i = pos;
             while i < buf_len {
-                // SAFETY: i < buf_len
                 let b = unsafe { *base.add(i) };
                 if b == 0 { i += 1; continue; }
                 let str_start = i;
@@ -221,7 +203,6 @@ pub fn parse_go_pclntab(buffer: &[u8]) -> Option<GoInfo> {
                 }
                 let slen = i - str_start;
                 if slen >= 4 {
-                    // SAFETY: str_start..i is within buffer bounds
                     let slice = unsafe { std::slice::from_raw_parts(base.add(str_start), slen) };
                     if let Ok(s) = std::str::from_utf8(slice) {
                         if s.contains('.') && !s.contains(' ') && s.len() < 200 {

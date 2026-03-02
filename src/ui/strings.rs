@@ -17,7 +17,6 @@ pub fn render_strings(ui: &mut Ui, pe: &PeInfo, filter: &mut String, kind_filter
     let normal: Vec<&ExtractedString> = visible.iter().copied().filter(|s| s.kind != StringKind::Obfuscated).collect();
     let obf:    Vec<&ExtractedString> = visible.iter().copied().filter(|s| s.kind == StringKind::Obfuscated).collect();
 
-    // Fixed header
     egui::Frame::none().inner_margin(egui::Margin::symmetric(12.0, 8.0)).show(ui, |ui| {
         let avail = ui.available_width();
         ui.horizontal(|ui| {
@@ -34,7 +33,6 @@ pub fn render_strings(ui: &mut Ui, pe: &PeInfo, filter: &mut String, kind_filter
         ui.label(RichText::new(format!("{} shown  ({} normal · {} obfuscated)", visible.len(), normal.len(), obf.len())).weak().size(12.0));
     });
 
-    // Scrollable content
     egui::ScrollArea::vertical()
         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
         .show(ui, |ui| {

@@ -5,25 +5,22 @@ use crate::heuristics::build_heuristic_flags;
 use crate::ui::*;
 
 pub struct SixEyesApp {
-    pub pe:                 Option<PeInfo>,
-    pub active_tab:         Tab,
-    pub last_tab:           Tab,
-    pub string_filter:      String,
-    pub string_kind_filter: StringKindFilter,
-    // Cached analysis (computed once on load, not per frame)
-    pub heuristic_flags:    Vec<crate::heuristics::HeuristicFlag>,
-    pub threat_score:       u8,
-    // Disasm state
-    pub disasm_goto:        String,
-    pub disasm_search:      String,
-    pub disasm_scroll_to:   Option<usize>,   // pending line index to scroll to
-    pub disasm_scroll_target_px: Option<f32>, // smooth-scroll target (pixels)
-    pub disasm_scroll_current_px: f32,        // smooth-scroll lerped position
-    pub disasm_settings: DisasmSettings,
-    // Animation state
-    pub tab_anim:           f32,   // 0.0..=1.0 content transition progress
-    pub tab_underline_x:    f32,   // current X position of underline (animated)
-    pub tab_underline_w:    f32,   // current width of underline (animated)
+    pub pe:                       Option<PeInfo>,
+    pub active_tab:               Tab,
+    pub last_tab:                 Tab,
+    pub string_filter:            String,
+    pub string_kind_filter:       StringKindFilter,
+    pub heuristic_flags:          Vec<crate::heuristics::HeuristicFlag>,
+    pub threat_score:             u8,
+    pub disasm_goto:              String,
+    pub disasm_search:            String,
+    pub disasm_scroll_to:         Option<usize>,
+    pub disasm_scroll_target_px:  Option<f32>,
+    pub disasm_scroll_current_px: f32,
+    pub disasm_settings:          DisasmSettings,
+    pub tab_anim:                 f32,
+    pub tab_underline_x:          f32,
+    pub tab_underline_w:          f32,
 }
 
 impl Default for SixEyesApp {
@@ -50,11 +47,8 @@ impl Default for SixEyesApp {
 }
 
 impl SixEyesApp {
-    /// Dispose all previous PE state and load a new file.
     fn load(&mut self, pe: PeInfo) {
-        // Drop the old PeInfo explicitly before assigning new one
         drop(self.pe.take());
-        // Compute heuristic flags once (not per frame)
         self.heuristic_flags = build_heuristic_flags(&pe);
         self.threat_score    = compute_threat_score(&self.heuristic_flags);
         self.pe                 = Some(pe);
@@ -85,14 +79,12 @@ impl eframe::App for SixEyesApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ctx.set_visuals(egui::Visuals::dark());
 
-        // Global style overrides
         let mut style = (*ctx.style()).clone();
         style.interaction.selectable_labels = false;
         style.spacing.scroll = egui::style::ScrollStyle::solid();
         style.spacing.scroll.bar_outer_margin = 0.0;
         style.spacing.scroll.bar_inner_margin = 2.0;
         style.spacing.scroll.bar_width = 8.0;
-        // Remove rounding from most widgets
         style.visuals.widgets.noninteractive.rounding = egui::Rounding::ZERO;
         style.visuals.widgets.inactive.rounding = egui::Rounding::ZERO;
         style.visuals.widgets.hovered.rounding = egui::Rounding::ZERO;
@@ -102,20 +94,17 @@ impl eframe::App for SixEyesApp {
         style.visuals.menu_rounding = egui::Rounding::ZERO;
         ctx.set_style(style);
 
-        // Tab change detection
         if self.last_tab != self.active_tab {
             self.tab_anim = 0.0;
             self.last_tab = self.active_tab;
         }
 
-        // Advance tab animation
         let dt = ctx.input(|i| i.stable_dt);
         if self.tab_anim < 1.0 {
             self.tab_anim = (self.tab_anim + dt / 0.3).min(1.0);
             ctx.request_repaint();
         }
 
-        // Custom titlebar
         let mut open_clicked = false;
         titlebar::render_titlebar(ctx, self.pe.as_ref().map(|p| p.path.as_str()), &mut open_clicked);
         if open_clicked {
@@ -128,12 +117,10 @@ impl eframe::App for SixEyesApp {
             }
         }
 
-        // Thin accent line between titlebar and tabs
         egui::TopBottomPanel::top("title_sep").exact_height(1.0)
             .frame(egui::Frame::none().fill(Color32::from_rgb(45, 50, 65)))
             .show(ctx, |_ui| {});
 
-        // Error bar
         if let Some(err) = self.pe.as_ref().and_then(|p| p.error.as_ref()) {
             let msg = format!("  {err}");
             egui::TopBottomPanel::bottom("errorbar").exact_height(26.0).show(ctx, |ui| {
@@ -141,7 +128,6 @@ impl eframe::App for SixEyesApp {
             });
         }
 
-        // Tab bar with animated underline
         egui::TopBottomPanel::top("tabs").exact_height(34.0)
             .frame(egui::Frame::none().fill(Color32::from_rgb(22, 24, 32)).inner_margin(egui::Margin::symmetric(8.0, 0.0)))
             .show(ctx, |ui| {
@@ -167,13 +153,11 @@ impl eframe::App for SixEyesApp {
                     }
                 });
 
-                // Initialize underline position if not set
                 if self.tab_underline_w == 0.0 {
                     self.tab_underline_x = target_x;
                     self.tab_underline_w = target_w;
                 }
 
-                // Smoothly lerp underline position
                 let lerp_speed = 12.0 * dt;
                 self.tab_underline_x += (target_x - self.tab_underline_x) * lerp_speed.min(1.0);
                 self.tab_underline_w += (target_w - self.tab_underline_w) * lerp_speed.min(1.0);
@@ -183,7 +167,6 @@ impl eframe::App for SixEyesApp {
                     ctx.request_repaint();
                 }
 
-                // Draw animated underline
                 let line_y = tab_bar_rect.max.y - 2.0;
                 let line_rect = Rect::from_min_size(
                     egui::pos2(self.tab_underline_x, line_y),
@@ -196,11 +179,9 @@ impl eframe::App for SixEyesApp {
                 }
             });
 
-        // Main content panel
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(ctx.style().visuals.panel_fill))
             .show(ctx, |ui| {
-                // Apply slide-up animation (no text color override — it breaks across frames)
                 let t = ease_out_cubic(self.tab_anim);
                 let offset = (1.0 - t) * 16.0;
 
@@ -225,14 +206,12 @@ impl eframe::App for SixEyesApp {
                 }
             });
 
-        // Window border — visible outline so the frameless window stands out
         let is_maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
         if !is_maximized {
             let screen = ctx.screen_rect();
             let accent = Color32::from_rgb(60, 140, 220);
             let border_color = Color32::from_rgb(55, 65, 85);
             let fg_painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("window_border")));
-            // Outer accent glow (subtle)
             fg_painter.rect_stroke(screen.expand(0.5), 0.0, Stroke::new(1.0,
                 Color32::from_rgba_premultiplied(
                     (accent.r() as u16 * 40 / 255) as u8,
@@ -241,7 +220,6 @@ impl eframe::App for SixEyesApp {
                     40,
                 ),
             ));
-            // Main border
             fg_painter.rect_stroke(screen, 0.0, Stroke::new(1.0, border_color));
         }
     }

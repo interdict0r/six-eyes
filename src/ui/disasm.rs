@@ -1,24 +1,20 @@
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Stroke, Ui};
 use crate::model::*;
 
-/// Width reserved for the branch-arc gutter (px).
 const ARC_COL_W: f32 = 60.0;
-/// Horizontal spacing per nesting column inside the gutter.
 const ARC_STEP: f32 = 7.0;
 
-// ── Syntax highlighting colors (IDA/Ghidra-inspired) ─────────────────────────
-
-const COL_REGISTER:   Color32 = Color32::from_rgb(220, 120, 150);   // pink-red
-const COL_NUMBER:     Color32 = Color32::from_rgb(100, 200, 170);   // teal-green
-const COL_MEMORY:     Color32 = Color32::from_rgb(160, 140, 200);   // muted purple
-const COL_SIZE_KW:    Color32 = Color32::from_rgb(110, 120, 140);   // dim gray for ptr/byte/word/dword/qword
-const COL_COMMA:      Color32 = Color32::from_rgb(110, 115, 130);   // punctuation
-const COL_COMMENT:    Color32 = Color32::from_rgb(100, 160, 80);    // green (like IDE comments)
-const COL_ADDR_RVA:   Color32 = Color32::from_rgb(100, 170, 255);   // blue
-const COL_ADDR_FUNC:  Color32 = Color32::from_rgb(180, 140, 255);   // purple for prologue
-const COL_HEX:        Color32 = Color32::from_rgb(100, 100, 120);   // dim
-const COL_SYMBOL:     Color32 = Color32::from_rgb(220, 180, 100);   // warm yellow for resolved symbols
-const COL_LINK:       Color32 = Color32::from_rgb(80, 180, 255);    // clickable address highlight
+const COL_REGISTER:   Color32 = Color32::from_rgb(220, 120, 150);
+const COL_NUMBER:     Color32 = Color32::from_rgb(100, 200, 170);
+const COL_MEMORY:     Color32 = Color32::from_rgb(160, 140, 200);
+const COL_SIZE_KW:    Color32 = Color32::from_rgb(110, 120, 140);
+const COL_COMMA:      Color32 = Color32::from_rgb(110, 115, 130);
+const COL_COMMENT:    Color32 = Color32::from_rgb(100, 160, 80);
+const COL_ADDR_RVA:   Color32 = Color32::from_rgb(100, 170, 255);
+const COL_ADDR_FUNC:  Color32 = Color32::from_rgb(180, 140, 255);
+const COL_HEX:        Color32 = Color32::from_rgb(100, 100, 120);
+const COL_SYMBOL:     Color32 = Color32::from_rgb(220, 180, 100);
+const COL_LINK:       Color32 = Color32::from_rgb(80, 180, 255);
 
 
 pub fn render_disasm(
@@ -48,13 +44,11 @@ pub fn render_disasm(
     let meta = pe.disasm_meta.as_ref();
     let lines = &pe.disasm_lines;
 
-    // ── Toolbar ──────────────────────────────────────────────────────────────
     egui::Frame::none()
         .inner_margin(egui::Margin::symmetric(8.0, 3.0))
         .fill(Color32::from_rgb(25, 27, 35))
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 1.0;
-            // First row: nav buttons + settings toggles
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 let btn = |ui: &mut Ui, label: &str, color: Color32| -> bool {
@@ -118,7 +112,6 @@ pub fn render_disasm(
                 });
             });
 
-            // Second row: go-to address + search + stats
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 ui.label(RichText::new("Go to:").weak().size(11.0));
@@ -164,7 +157,6 @@ pub fn render_disasm(
 
     ui.add(egui::Separator::default().spacing(0.0));
 
-    // ── Instruction listing ──────────────────────────────────────────────────
     let row_height = 15.0;
     let search_active = !search_buf.is_empty();
     let needle = search_buf.to_ascii_lowercase();
@@ -180,7 +172,6 @@ pub fn render_disasm(
 
     let display_count = if search_active { filtered.len() } else { lines.len() };
 
-    // ── Smooth scroll animation ──────────────────────────────────────────────
     let dt = ui.ctx().input(|i| i.stable_dt);
 
     if let Some(target_idx) = scroll_to.take() {
@@ -208,7 +199,6 @@ pub fn render_disasm(
         scroll_area = scroll_area.vertical_scroll_offset(*scroll_current_px);
     }
 
-    // Snapshot settings for closure
     let s_show_hex      = settings.show_hex;
     let s_show_arcs     = settings.show_arcs;
     let s_show_comments = settings.show_comments;
@@ -226,11 +216,9 @@ pub fn render_disasm(
         let mut row_ys: Vec<(usize, f32)> = Vec::with_capacity(row_range.len());
         let painter = ui.painter().clone();
 
-        // arc_gutter_left_x will be set from the first row's address end position
         let mut arc_gutter_left_x: f32 = 0.0;
         let mut arc_gutter_right_x: f32 = 0.0;
 
-        // Pre-compute arc endpoint markers
         let mut arc_endpoints: std::collections::HashMap<usize, (bool, bool, Color32)> =
             std::collections::HashMap::new();
         if let Some(m) = meta {
@@ -256,7 +244,6 @@ pub fn render_disasm(
             let line_idx = if search_active { filtered[row] } else { row };
             let line = &lines[line_idx];
 
-            // ── Entry point / user code banners ──────────────────────
             if !search_active {
                 let is_ep = line_idx == 0;
                 let is_uc = user_code_idx == Some(line_idx);
@@ -286,7 +273,6 @@ pub fn render_disasm(
                 }
             }
 
-            // ── Function boundary ────────────────────────────────────
             if line.is_prologue && row > 0 {
                 let rect = ui.available_rect_before_wrap();
                 let y = rect.min.y;
@@ -301,13 +287,11 @@ pub fn render_disasm(
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
 
-                // ── Address column ──────────────────────────────────
                 let addr_str = format_addr(line, s_use_rva, image_base);
                 let addr_color = if line.is_prologue { COL_ADDR_FUNC } else { COL_ADDR_RVA };
                 ui.label(RichText::new(&addr_str).monospace().size(11.0).color(addr_color));
                 ui.add_space(4.0);
 
-                // ── Arc gutter (between address and opcode) ─────────
                 let gutter_left = ui.cursor().min.x;
                 if s_show_arcs && !search_active {
                     ui.add_space(ARC_COL_W);
@@ -321,7 +305,6 @@ pub fn render_disasm(
                 arc_gutter_left_x = gutter_left;
                 arc_gutter_right_x = gutter_right;
 
-                // ── Hex bytes column ────────────────────────────────
                 if s_show_hex {
                     let hex_display = if line.hex_bytes.len() > 24 {
                         format!("{:<24}", &line.hex_bytes[..24])
@@ -332,18 +315,15 @@ pub fn render_disasm(
                     ui.add_space(4.0);
                 }
 
-                // ── Opcode column (fixed width) ─────────────────────
                 let opcode_display = format!("{:<7}", line.opcode);
                 let opcode_color = line.kind.color();
                 ui.label(RichText::new(&opcode_display).monospace().size(11.0).color(opcode_color));
                 ui.add_space(2.0);
 
-                // ── Operands column (syntax highlighted) ────────────
                 if !line.operands.is_empty() {
                     render_operands(ui, &line.operands, line, first_ip, last_ip, lines, scroll_to, s_rel_addr);
                 }
 
-                // ── Comment column ──────────────────────────────────
                 if s_show_comments && !line.comment.is_empty() {
                     ui.add_space(8.0);
                     let (prefix, color) = if line.comment.starts_with('"') {
@@ -357,7 +337,6 @@ pub fn render_disasm(
             });
         }
 
-        // ── Paint branch arcs ────────────────────────────────────────────────
         if let Some(m) = meta {
             if !search_active && s_show_arcs {
                 let vis_lo = row_range.start;
@@ -370,7 +349,6 @@ pub fn render_disasm(
                 let right_edge = arc_gutter_right_x;
                 let gutter_left = arc_gutter_left_x;
 
-                // Paint arc endpoint stripe markers at the right edge of the gutter
                 for (&line_idx, &(is_src, is_dst, color)) in &arc_endpoints {
                     if let Some(&cy) = idx_to_y.get(&line_idx) {
                         let marker_x = right_edge - 6.0;
@@ -392,7 +370,6 @@ pub fn render_disasm(
                     }
                 }
 
-                // Sort arcs: draw larger (outer) columns first, smaller (inner) on top
                 let mut arc_order: Vec<usize> = (0..m.arcs.len()).collect();
                 arc_order.sort_by(|&a, &b| m.arcs[b].col.cmp(&m.arcs[a].col));
 
@@ -403,7 +380,6 @@ pub fn render_disasm(
                     if hi < vis_lo || lo > vis_hi { continue; }
                     if hi - lo > s_max_span { continue; }
 
-                    // Columns grow leftward from the right edge of the gutter
                     let col_x = gutter_left + (arc.col as f32 + 1.0) * ARC_STEP;
                     let color = arc_color(arc.kind);
                     let is_dashed = arc.kind == InstrKind::CondJump;
@@ -453,7 +429,6 @@ pub fn render_disasm(
                     let draw_color = if any_hover { brighten(color, 80) } else { color };
                     let stroke = Stroke::new(if any_hover { 1.5 } else { 1.0 }, draw_color);
 
-                    // Source horizontal tick (col_x -> arc_end)
                     if idx_to_y.contains_key(&arc.from) {
                         if is_dashed {
                             draw_dashed_hline(&painter, from_y, col_x, arc_end, stroke, 3.0, 2.0);
@@ -463,14 +438,12 @@ pub fn render_disasm(
                         painter.circle_filled(Pos2::new(arc_end, from_y), 2.0, draw_color);
                     }
 
-                    // Vertical line
                     if is_dashed {
                         draw_dashed_vline(&painter, col_x, top_y, bot_y, stroke, 3.0, 2.0);
                     } else {
                         painter.line_segment([Pos2::new(col_x, top_y), Pos2::new(col_x, bot_y)], stroke);
                     }
 
-                    // Target horizontal tick + arrowhead (pointing right toward instructions)
                     if idx_to_y.contains_key(&arc.to) {
                         if is_dashed {
                             draw_dashed_hline(&painter, to_y, col_x, arc_end, stroke, 3.0, 2.0);
@@ -497,9 +470,6 @@ pub fn render_disasm(
                         let src_addr = format_addr(&lines[arc.from], s_use_rva, image_base);
                         let dst_addr = format_addr(&lines[arc.to], s_use_rva, image_base);
                         let tip = format!("{kind_label}: {src_addr} -> {dst_addr}\nClick to follow");
-                        if from_hovered {
-                            // noop — tooltip shown via vert_resp
-                        }
                         vert_resp.on_hover_text(tip);
                     }
                 }
@@ -511,8 +481,6 @@ pub fn render_disasm(
         *scroll_current_px = output.state.offset.y;
     }
 }
-
-// ── Syntax-highlighted operand rendering ─────────────────────────────────────
 
 fn render_operands(
     ui: &mut Ui,
@@ -549,10 +517,8 @@ fn render_operands(
             }
         };
 
-        // Make hex address operands clickable with underline + tooltip
         if let OpToken::Number(_) = tok {
             if let Some(target) = clickable_target {
-                // Resolve target for tooltip info
                 let tgt_idx = all_lines.iter().position(|l| l.ip == target);
                 let display_text = if rel_addr {
                     let offset = target as i64 - line.ip as i64;
@@ -711,8 +677,6 @@ fn is_number(word: &str) -> bool {
     }
     word.bytes().all(|b| b.is_ascii_digit())
 }
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
 
 fn format_addr(line: &DisasmLine, use_rva: bool, _image_base: u64) -> String {
     if use_rva {

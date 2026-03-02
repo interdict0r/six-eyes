@@ -24,7 +24,6 @@ pub fn render_heuristics(ui: &mut Ui, flags: &[HeuristicFlag]) {
         let score = ((crits * 25 + warns * 10 + infos * 2) as u8).min(100);
         let sc = score_color(score);
 
-        // Threat Score Gauge
         section_card(ui, |ui| {
             ui.vertical_centered(|ui| {
                 ui.label(RichText::new(format!("{score}")).size(52.0).color(sc).strong());
@@ -54,7 +53,6 @@ pub fn render_heuristics(ui: &mut Ui, flags: &[HeuristicFlag]) {
         });
         ui.add_space(16.0);
 
-        // Category Cards (collapsible)
         for cat in &["Packing/Obfuscation", "Imports", "Exports", "Structure", "Security", "Metadata"] {
             let cat_flags: Vec<&crate::heuristics::HeuristicFlag> = flags.iter().filter(|f| &f.category == cat).collect();
             if cat_flags.is_empty() { continue; }
@@ -97,6 +95,6 @@ pub fn render_heuristics(ui: &mut Ui, flags: &[HeuristicFlag]) {
             ui.add_space(8.0);
         }
 
-        }); // margin
-    }); // scroll
+        });
+    });
 }

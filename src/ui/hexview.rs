@@ -15,7 +15,6 @@ pub fn render_hexview(ui: &mut Ui, pe: &PeInfo) {
     let total_rows = (pe.buffer.len() + BYTES_PER_ROW - 1) / BYTES_PER_ROW;
     let row_height = 18.0;
 
-    // Header
     egui::Frame::none().inner_margin(egui::Margin::symmetric(12.0, 6.0)).show(ui, |ui| {
         ui.label(RichText::new(format!("{} bytes  ·  {} rows", pe.buffer.len(), total_rows)).weak().size(12.0));
     });
@@ -29,7 +28,6 @@ pub fn render_hexview(ui: &mut Ui, pe: &PeInfo) {
             let len = buf.len();
             let lut = HEX_LUT.as_ptr();
 
-            // Reuse buffers across rows — avoid per-row Vec allocations
             let mut hex_buf: Vec<u8> = Vec::with_capacity(BYTES_PER_ROW * 3);
             let mut ascii_buf: Vec<u8> = Vec::with_capacity(BYTES_PER_ROW);
             let mut off_buf: Vec<u8> = Vec::with_capacity(8);
@@ -39,7 +37,6 @@ pub fn render_hexview(ui: &mut Ui, pe: &PeInfo) {
                 let end = (offset + BYTES_PER_ROW).min(len);
                 let count = end - offset;
 
-                // Build hex string using LUT
                 hex_buf.clear();
                 for i in 0..BYTES_PER_ROW {
                     if i < count {
@@ -56,7 +53,6 @@ pub fn render_hexview(ui: &mut Ui, pe: &PeInfo) {
                 }
                 let hex_str = unsafe { std::str::from_utf8_unchecked(&hex_buf) };
 
-                // Build ASCII string
                 ascii_buf.clear();
                 for i in 0..count {
                     let b = unsafe { *ptr.add(offset + i) };
@@ -64,7 +60,6 @@ pub fn render_hexview(ui: &mut Ui, pe: &PeInfo) {
                 }
                 let ascii_str = unsafe { std::str::from_utf8_unchecked(&ascii_buf) };
 
-                // Offset string using LUT
                 off_buf.clear();
                 let off_bytes = (offset as u32).to_be_bytes();
                 for &b in &off_bytes {

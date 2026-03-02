@@ -3,8 +3,6 @@ use std::sync::LazyLock;
 use eframe::egui::Color32;
 use crate::model::*;
 
-// ── Suspicious import lookup (HashSet for O(1)) ───────────────────────────────
-
 pub static HIGH_SUSPICIOUS_IMPORTS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     [
         "VirtualAllocEx","WriteProcessMemory","CreateRemoteThread","NtCreateThreadEx",
@@ -26,8 +24,6 @@ pub fn suspicious_import_color(name: &str) -> Color32 {
     else if MED_SUSPICIOUS_IMPORTS.contains(name) { Color32::from_rgb(220,160,40) }
     else { Color32::GRAY }
 }
-
-// ── Capability mapping ────────────────────────────────────────────────────────
 
 pub struct CapabilityDef {
     pub name:        &'static str,
@@ -163,8 +159,6 @@ pub fn detect_capabilities(pe: &PeInfo) -> Vec<MatchedCapability> {
     caps
 }
 
-// ── Heuristic flags ──────────────────────────────────────────────────────────
-
 #[derive(Clone)]
 pub struct HeuristicFlag {
     pub severity: Severity,
@@ -213,7 +207,6 @@ pub fn build_heuristic_flags(pe: &PeInfo) -> Vec<HeuristicFlag> {
         if s.characteristics.contains(&"WRITE") && s.characteristics.contains(&"EXECUTE") {
             f!(Severity::Warn, "Packing/Obfuscation", format!("'{}' is RWX — self-modifying code", s.name));
         }
-        // Section inflation: VirtualSize >> RawDataSize
         if s.raw_size > 0 && s.virtual_size > s.raw_size * 10 {
             let ratio = s.virtual_size / s.raw_size;
             f!(Severity::Warn, "Packing/Obfuscation",
@@ -319,7 +312,6 @@ pub fn build_heuristic_flags(pe: &PeInfo) -> Vec<HeuristicFlag> {
         f!(Severity::Info, "Metadata", "No Rich header — possibly stripped");
     }
 
-    // Rich header vs PE timestamp anomaly
     if !pe.rich_entries.is_empty() && pe.pe_timestamp != 0 {
         let max_pid = pe.rich_entries.iter().map(|(pid, _, _)| *pid).max().unwrap_or(0);
         let rich_era = match max_pid {
@@ -341,7 +333,6 @@ pub fn build_heuristic_flags(pe: &PeInfo) -> Vec<HeuristicFlag> {
         }
     }
 
-    // Forwarded export anomaly (proxy DLL / sideloading)
     if let Some(ref exp) = pe.exports {
         let fwd_count = exp.exports.iter().filter(|e| e.forwarded.is_some()).count();
         let total = exp.exports.len();
@@ -354,7 +345,6 @@ pub fn build_heuristic_flags(pe: &PeInfo) -> Vec<HeuristicFlag> {
         }
     }
 
-    // Authenticode signature
     if pe.certificate.is_none() {
         f!(Severity::Info, "Security", "No Authenticode signature");
     }

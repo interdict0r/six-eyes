@@ -1,7 +1,5 @@
 use eframe::egui::Color32;
 
-// ── Data model ────────────────────────────────────────────────────────────────
-
 #[derive(Default)]
 pub struct PeInfo {
     pub path:        String,
@@ -37,7 +35,7 @@ pub struct PeInfo {
     pub certificate:       Option<CertificateInfo>,
     pub disasm_lines:      Vec<DisasmLine>,
     pub disasm_meta:       Option<DisasmMeta>,
-    pub iat_map:           std::collections::HashMap<u64, String>,  // VA -> "DLL!Function"
+    pub iat_map:           std::collections::HashMap<u64, String>,
     pub buffer:            Vec<u8>,
 }
 
@@ -56,13 +54,13 @@ impl InstrKind {
     #[inline]
     pub fn color(self) -> Color32 {
         match self {
-            Self::Call     => Color32::from_rgb(255, 180, 80),   // orange
-            Self::Jump     => Color32::from_rgb(100, 220, 100),  // green
-            Self::CondJump => Color32::from_rgb(200, 220, 80),   // yellow-green
-            Self::Ret      => Color32::from_rgb(230, 90, 90),    // red
-            Self::Nop      => Color32::from_rgb(90, 90, 100),    // dim gray
-            Self::Int      => Color32::from_rgb(200, 130, 230),  // purple
-            Self::Other    => Color32::from_rgb(210, 210, 220),  // near-white
+            Self::Call     => Color32::from_rgb(255, 180, 80),
+            Self::Jump     => Color32::from_rgb(100, 220, 100),
+            Self::CondJump => Color32::from_rgb(200, 220, 80),
+            Self::Ret      => Color32::from_rgb(230, 90, 90),
+            Self::Nop      => Color32::from_rgb(90, 90, 100),
+            Self::Int      => Color32::from_rgb(200, 130, 230),
+            Self::Other    => Color32::from_rgb(210, 210, 220),
         }
     }
 }
@@ -71,32 +69,30 @@ pub struct DisasmLine {
     pub ip:          u64,
     pub rva:         u32,
     pub hex_bytes:   String,
-    pub opcode:      String,          // mnemonic only (e.g. "push", "call")
-    pub operands:    String,          // operand text (e.g. "rbp", "qword ptr [rax+10h]")
-    pub mnemonic:    String,          // full text for search compat
+    pub opcode:      String,
+    pub operands:    String,
+    pub mnemonic:    String,
     pub kind:        InstrKind,
-    pub target:      Option<u64>,     // branch/call target VA (near only)
+    pub target:      Option<u64>,
     pub is_prologue: bool,
-    pub comment:     String,          // auto-generated comment (IAT symbol, string preview, xref)
+    pub comment:     String,
 }
 
-/// A visual connector between a branch/call source and its target.
 pub struct BranchArc {
-    pub from: usize,      // source line index (the branch instruction)
-    pub to:   usize,      // target line index
+    pub from: usize,
+    pub to:   usize,
     pub kind: InstrKind,
-    pub col:  u8,         // visual nesting column (0 = closest to instructions)
+    pub col:  u8,
 }
 
-/// Aggregate stats + heuristic pointers for the disasm tab.
 pub struct DisasmMeta {
     pub calls:       u32,
     pub jumps:       u32,
     pub rets:        u32,
     pub nops:        u32,
-    pub func_starts: Vec<usize>,      // indices into disasm_lines that are prologues
-    pub user_code:   Option<usize>,   // index of likely user-code entry (first internal call target prologue)
-    pub arcs:        Vec<BranchArc>,  // pre-computed branch connectors with column assignments
+    pub func_starts: Vec<usize>,
+    pub user_code:   Option<usize>,
+    pub arcs:        Vec<BranchArc>,
 }
 
 pub struct SectionInfo {
@@ -204,14 +200,12 @@ impl StringKind {
     }
 }
 
-// ── Disasm display settings ───────────────────────────────────────────────────
-
 pub struct DisasmSettings {
     pub show_hex:      bool,
     pub show_arcs:     bool,
-    pub show_comments: bool,     // IAT symbols, string previews, xrefs
-    pub use_rva:       bool,     // show RVA instead of full VA
-    pub rel_addr:      bool,     // show relative offsets on clickable branch targets
+    pub show_comments: bool,
+    pub use_rva:       bool,
+    pub rel_addr:      bool,
     pub max_arc_span:  usize,
 }
 
@@ -227,8 +221,6 @@ impl Default for DisasmSettings {
         }
     }
 }
-
-// ── App state ─────────────────────────────────────────────────────────────────
 
 #[derive(Default, PartialEq, Clone, Copy)]
 pub enum Tab { #[default] Overview, Imports, Strings, Heuristics, HexView, Disasm }

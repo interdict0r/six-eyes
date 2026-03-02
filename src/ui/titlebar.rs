@@ -8,19 +8,16 @@ pub fn render_titlebar(ctx: &egui::Context, file_path: Option<&str>, open_clicke
         .frame(egui::Frame::none().fill(titlebar_bg).inner_margin(egui::Margin::symmetric(14.0, 0.0)))
         .show(ctx, |ui| {
             let any_hovered = ui.horizontal_centered(|ui| {
-                // Brand
                 let (icon_rect, _) = ui.allocate_exact_size(Vec2::new(20.0, 16.0), egui::Sense::hover());
                 draw_eye_icon(ui, icon_rect);
                 ui.add_space(6.0);
                 ui.label(RichText::new("six eyes").color(Color32::from_rgb(200, 210, 230)).strong().size(15.0));
                 ui.add_space(16.0);
 
-                // Separator
                 let sep = ui.allocate_exact_size(Vec2::new(1.0, 22.0), egui::Sense::hover()).0;
                 ui.painter().rect_filled(sep, 0.0, Color32::from_rgb(45, 48, 58));
                 ui.add_space(12.0);
 
-                // Open PE
                 let open_resp = ui.add(
                     egui::Button::new(RichText::new("Open PE...").size(12.0).color(Color32::from_rgb(180, 190, 210)))
                         .fill(Color32::from_rgb(30, 34, 44))
@@ -29,18 +26,15 @@ pub fn render_titlebar(ctx: &egui::Context, file_path: Option<&str>, open_clicke
                 );
                 if open_resp.clicked() { *open_clicked = true; }
 
-                // File path
                 if let Some(path) = file_path {
                     ui.add_space(10.0);
                     ui.label(RichText::new(super::truncate_path(path, 80))
                         .color(Color32::from_rgb(90, 95, 110)).italics().size(12.0));
                 }
 
-                // Push controls right
                 let remaining = ui.available_width() - 110.0;
                 if remaining > 0.0 { ui.add_space(remaining); }
 
-                // Window controls
                 let btn_size = Vec2::new(36.0, 30.0);
                 let idle = Color32::from_rgb(130, 135, 150);
                 let hover_col = Color32::from_rgb(220, 225, 235);
@@ -60,7 +54,6 @@ pub fn render_titlebar(ctx: &egui::Context, file_path: Option<&str>, open_clicke
                 open_resp.hovered() || min_r.hovered() || max_r.hovered() || close_r.hovered()
             }).inner;
 
-            // Drag-to-move via raw pointer state — bypasses egui widget system entirely
             let titlebar_rect = ui.min_rect();
             if !any_hovered {
                 if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
@@ -119,7 +112,6 @@ fn draw_eye_icon(ui: &egui::Ui, rect: Rect) {
     let (hw, hh) = (9.0, 5.0);
     let steps = 12;
 
-    // Glow: concentric translucent circles radiating outward
     let glow_layers: &[(f32, u8)] = &[
         (10.0, 8), (8.0, 12), (6.0, 18), (4.5, 25),
     ];

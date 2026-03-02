@@ -1,4 +1,3 @@
-/// Hex lookup table — two ASCII chars per byte value.
 pub(crate) const HEX_LUT: &[u8; 512] = b"\
 000102030405060708090a0b0c0d0e0f\
 101112131415161718191a1b1c1d1e1f\
@@ -17,21 +16,17 @@ d0d1d2d3d4d5d6d7d8d9dadbdcdddedf\
 e0e1e2e3e4e5e6e7e8e9eaebecedeeef\
 f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff";
 
-/// Convert a byte slice to lowercase hex using the lookup table.
-/// SAFETY: all LUT entries are valid ASCII, so the result is valid UTF-8.
 #[inline]
 pub(crate) fn bytes_to_hex(bytes: &[u8]) -> String {
     let mut buf = Vec::with_capacity(bytes.len() * 2);
     let lut = HEX_LUT.as_ptr();
     for &b in bytes {
         let idx = (b as usize) * 2;
-        // SAFETY: b is u8, so idx < 512 = HEX_LUT.len()
         unsafe {
             buf.push(*lut.add(idx));
             buf.push(*lut.add(idx + 1));
         }
     }
-    // SAFETY: all bytes come from the hex LUT which is pure ASCII
     unsafe { String::from_utf8_unchecked(buf) }
 }
 
@@ -76,7 +71,6 @@ pub fn md5_hex(data: &[u8]) -> String {
         let mut m = [0u32; 16];
         let base = chunk.as_ptr();
         for i in 0..16 {
-            // SAFETY: chunk is exactly 64 bytes, i*4+3 < 64
             m[i] = unsafe {
                 u32::from_le(std::ptr::read_unaligned(base.add(i * 4) as *const u32))
             };
@@ -156,7 +150,6 @@ pub fn sha256_hex(data: &[u8]) -> String {
         let mut w = [0u32; 64];
         let base = chunk.as_ptr();
         for i in 0..16 {
-            // SAFETY: chunk is exactly 64 bytes, i*4+3 < 64
             w[i] = unsafe {
                 u32::from_be(std::ptr::read_unaligned(base.add(i * 4) as *const u32))
             };
@@ -196,14 +189,11 @@ pub fn sha256_hex(data: &[u8]) -> String {
     bytes_to_hex(&digest)
 }
 
-/// PE checksum using the standard fold-carry algorithm.
-/// Uses `ptr::read_unaligned` for u16 reads to avoid per-iteration overhead.
 pub fn calculate_checksum(data: &[u8]) -> u32 {
     let len = data.len();
     let word_count = len / 2;
     let mut cs: u64 = 0;
 
-    // SAFETY: we read exactly word_count u16s; word_count * 2 <= len
     unsafe {
         let ptr = data.as_ptr();
         for i in 0..word_count {

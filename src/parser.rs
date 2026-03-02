@@ -19,7 +19,6 @@ pub fn parse_pe(path: &str) -> PeInfo {
 
     let pe = VecPE::from_disk_data(&buffer);
 
-    // Single NT header lookup — extract all fields at once
     let is_64;
     if let Ok(nt) = pe.get_nt_headers_64() {
         is_64 = true;
@@ -53,14 +52,12 @@ pub fn parse_pe(path: &str) -> PeInfo {
     info.calc_cs    = calculate_checksum(&buffer);
     info.checksum_ok = info.stored_cs == 0 || info.stored_cs == info.calc_cs;
 
-    // Rich header — structured parse
     if let Some(rich) = parse_rich_header(&buffer) {
         info.rich_hint    = Some(rich.hint);
         info.rich_hash    = Some(rich.hash);
         info.rich_entries = rich.entries;
     }
 
-    // Sections
     let mut last_end: u32 = 0;
     if let Ok(sections) = pe.get_section_table() {
         for section in sections {
@@ -88,30 +85,23 @@ pub fn parse_pe(path: &str) -> PeInfo {
         }
     }
 
-    // Overlay
     if (last_end as usize) < buffer.len() {
         let size = buffer.len() - last_end as usize;
         info.strings.extend(extract_strings(&buffer[last_end as usize..], last_end as usize, "overlay"));
         info.overlay = Some(OverlayInfo { offset: last_end, size });
     }
 
-    // Imports
     info.imports = parse_imports(&pe, &buffer, is_64);
     info.imphash = compute_imphash(&info.imports);
 
-    // Exports
     info.exports = parse_exports(&pe, &buffer);
 
-    // Block entropy heatmap (1KB blocks)
     info.block_entropy = compute_block_entropy(&buffer, 1024);
 
-    // Resources
     info.resources = parse_resources(&pe, &buffer);
 
-    // Certificate
     info.certificate = parse_certificate(&pe, &buffer);
 
-    // Language detection & extended info
     info.detected_language = detect_language(&info, &buffer);
     if info.detected_language.as_deref() == Some("Go") {
         info.go_info = parse_go_pclntab(&buffer);
@@ -120,22 +110,17 @@ pub fn parse_pe(path: &str) -> PeInfo {
         info.rust_info = extract_rust_info(&info.strings);
     }
 
-    // Build IAT VA -> "DLL!Function" map for symbol resolution in disassembly
     info.iat_map = build_iat_map(&pe, &buffer, is_64, info.image_base);
 
-    // Pre-decode disassembly from entry point (cached — avoids per-frame decode)
     let (dlines, dmeta) = compute_disasm_lines(&info, &buffer);
     info.disasm_lines = dlines;
     info.disasm_meta  = Some(dmeta);
 
-    // Persist raw buffer for hex viewer
     info.buffer = buffer;
 
     info
 }
 
-/// Read a little-endian u32 from `buf` at `offset` via `ptr::read_unaligned`.
-/// SAFETY: caller must ensure `offset + 4 <= buf.len()`.
 #[inline(always)]
 unsafe fn read_u32_le(buf: &[u8], offset: usize) -> u32 {
     unsafe {
@@ -143,8 +128,6 @@ unsafe fn read_u32_le(buf: &[u8], offset: usize) -> u32 {
     }
 }
 
-/// Read a little-endian u64 from `buf` at `offset` via `ptr::read_unaligned`.
-/// SAFETY: caller must ensure `offset + 8 <= buf.len()`.
 #[inline(always)]
 unsafe fn read_u64_le(buf: &[u8], offset: usize) -> u64 {
     unsafe {
@@ -152,8 +135,6 @@ unsafe fn read_u64_le(buf: &[u8], offset: usize) -> u64 {
     }
 }
 
-/// Read a little-endian u16 from `buf` at `offset` via `ptr::read_unaligned`.
-/// SAFETY: caller must ensure `offset + 2 <= buf.len()`.
 #[inline(always)]
 unsafe fn read_u16_le(buf: &[u8], offset: usize) -> u16 {
     unsafe {
@@ -161,17 +142,12 @@ unsafe fn read_u16_le(buf: &[u8], offset: usize) -> u16 {
     }
 }
 
-// ── ImpHash ──────────────────────────────────────────────────────────────────
-
-/// Compute ImpHash: MD5 of normalized "dll.function" pairs joined by commas.
-/// Single allocation for the concatenated string buffer.
 fn compute_imphash(imports: &[ImportInfo]) -> String {
     if imports.is_empty() { return String::new(); }
     let mut buf: Vec<u8> = Vec::with_capacity(4096);
     let mut first = true;
     for imp in imports {
         let dll_bytes = imp.dll.as_bytes();
-        // Strip trailing .dll/.DLL/etc extension (last 4 bytes if preceded by '.')
         let dll_end = if dll_bytes.len() > 4 {
             let dot_pos = dll_bytes.len() - 4;
             if dll_bytes[dot_pos] == b'.' { dot_pos } else { dll_bytes.len() }
@@ -194,8 +170,6 @@ fn compute_imphash(imports: &[ImportInfo]) -> String {
     md5_hex(&buf)
 }
 
-// ── Export Directory ──────────────────────────────────────────────────────────
-
 fn parse_exports(pe: &VecPE, buffer: &[u8]) -> Option<ExportInfo> {
     let dd = pe.get_data_directory(exe::ImageDirectoryEntry::Export).ok()?;
     let export_rva = dd.virtual_address.0;
@@ -205,7 +179,6 @@ fn parse_exports(pe: &VecPE, buffer: &[u8]) -> Option<ExportInfo> {
     let base_off = rva_to_offset(pe, export_rva)?;
     if base_off + 40 > buffer.len() { return None; }
 
-    // IMAGE_EXPORT_DIRECTORY (40 bytes)
     let name_rva     = unsafe { read_u32_le(buffer, base_off + 12) };
     let ordinal_base = unsafe { read_u32_le(buffer, base_off + 16) };
     let num_funcs    = unsafe { read_u32_le(buffer, base_off + 20) };
@@ -222,7 +195,6 @@ fn parse_exports(pe: &VecPE, buffer: &[u8]) -> Option<ExportInfo> {
     let name_off = rva_to_offset(pe, name_rva_tbl);
     let ord_off  = rva_to_offset(pe, ord_tbl);
 
-    // Build ordinal-index → name map: O(1) lookup by function index
     let count = (num_funcs as usize).min(8192);
     let mut name_map: Vec<Option<String>> = vec![None; count];
     if let (Some(no), Some(oo)) = (name_off, ord_off) {
@@ -250,7 +222,6 @@ fn parse_exports(pe: &VecPE, buffer: &[u8]) -> Option<ExportInfo> {
         let ordinal = (ordinal_base as u16).wrapping_add(i as u16);
         let name = name_map[i].take();
 
-        // Forwarded export: function RVA falls within export directory range
         let forwarded = if frva >= export_rva && frva < export_end_rva {
             rva_to_offset(pe, frva).map(|o| read_cstring(buffer, o))
         } else {
@@ -263,8 +234,6 @@ fn parse_exports(pe: &VecPE, buffer: &[u8]) -> Option<ExportInfo> {
     Some(ExportInfo { dll_name, num_funcs, num_names, base: ordinal_base, exports })
 }
 
-// ── Block Entropy ────────────────────────────────────────────────────────────
-
 fn compute_block_entropy(buffer: &[u8], block_size: usize) -> Vec<f32> {
     let n = (buffer.len() + block_size - 1) / block_size;
     let mut result = Vec::with_capacity(n);
@@ -276,8 +245,6 @@ fn compute_block_entropy(buffer: &[u8], block_size: usize) -> Vec<f32> {
     }
     result
 }
-
-// ── Disassembly (precomputed) ───────────────────────────────────────────────
 
 fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8]) -> (Vec<DisasmLine>, DisasmMeta) {
     let empty = || (Vec::new(), DisasmMeta { calls: 0, jumps: 0, rets: 0, nops: 0, func_starts: Vec::new(), user_code: None, arcs: Vec::new() });
@@ -306,11 +273,9 @@ fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8]) -> (Vec<DisasmLine>, DisasmM
 
     let mut meta = DisasmMeta { calls: 0, jumps: 0, rets: 0, nops: 0, func_starts: Vec::new(), user_code: None, arcs: Vec::new() };
 
-    // Build a set of all decoded IPs for quick target-in-range lookups
     let first_ip = instructions[0].ip();
     let last_ip  = instructions.last().map(|i| i.ip()).unwrap_or(first_ip);
 
-    // Build string VA map: collect strings from .rdata/.data sections for inline preview
     let string_va_map = build_string_va_map(pe);
 
     for (idx, instr) in instructions.iter().enumerate() {
@@ -320,7 +285,6 @@ fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8]) -> (Vec<DisasmLine>, DisasmM
         let instr_ip = instr.ip();
         let instr_len = instr.len();
 
-        // Split formatted output into opcode + operands
         let (opcode, operands) = split_opcode_operands(&output);
 
         let rva = (instr_ip - pe.image_base) as u32;
@@ -342,7 +306,6 @@ fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8]) -> (Vec<DisasmLine>, DisasmM
             String::new()
         };
 
-        // Classify using iced-x86 flow control analysis
         let fc = instr.flow_control();
         let kind = match fc {
             FlowControl::UnconditionalBranch | FlowControl::IndirectBranch => InstrKind::Jump,
@@ -351,12 +314,10 @@ fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8]) -> (Vec<DisasmLine>, DisasmM
             FlowControl::Return => InstrKind::Ret,
             FlowControl::Interrupt => InstrKind::Int,
             _ => {
-                // Detect nop (check mnemonic output)
                 if output.starts_with("nop") { InstrKind::Nop } else { InstrKind::Other }
             }
         };
 
-        // Extract near branch/call target
         let target = match fc {
             FlowControl::UnconditionalBranch | FlowControl::ConditionalBranch | FlowControl::Call => {
                 let t = instr.near_branch_target();
@@ -365,10 +326,8 @@ fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8]) -> (Vec<DisasmLine>, DisasmM
             _ => None,
         };
 
-        // Detect function prologue patterns
         let is_prologue = detect_prologue(&instructions, idx, bitness);
 
-        // Update stats
         match kind {
             InstrKind::Call     => meta.calls += 1,
             InstrKind::Jump | InstrKind::CondJump => meta.jumps += 1,
@@ -381,7 +340,6 @@ fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8]) -> (Vec<DisasmLine>, DisasmM
             meta.func_starts.push(idx);
         }
 
-        // Build auto-comment: IAT symbol resolution, string preview
         let comment = build_comment(instr, &pe.iat_map, &string_va_map, target, bitness);
 
         lines.push(DisasmLine {
@@ -392,20 +350,13 @@ fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8]) -> (Vec<DisasmLine>, DisasmM
         });
     }
 
-    // "Jump to user code" heuristic:
-    // Find the first CALL to an internal address whose target is a detected prologue.
-    // This skips CRT init calls (which go to imports or runtime stubs) and finds main().
     if meta.user_code.is_none() {
-        // Build a quick IP -> line index map for prologue targets
         for (idx, line) in lines.iter().enumerate() {
             if line.kind == InstrKind::Call {
                 if let Some(tgt) = line.target {
-                    // Target must be within decoded range
                     if tgt >= first_ip && tgt <= last_ip {
-                        // Find the line at that target
                         if let Some(tgt_idx) = lines.iter().position(|l| l.ip == tgt) {
                             if lines[tgt_idx].is_prologue {
-                                // Skip if this is the very first instruction (EP itself)
                                 if tgt_idx != 0 && idx > 0 {
                                     meta.user_code = Some(tgt_idx);
                                     break;
@@ -418,8 +369,6 @@ fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8]) -> (Vec<DisasmLine>, DisasmM
         }
     }
 
-    // Build branch arcs for visual connectors (only for in-range targets)
-    // Also build an IP -> index map for O(1) target resolution
     let mut ip_to_idx: std::collections::HashMap<u64, usize> = std::collections::HashMap::with_capacity(lines.len());
     for (i, l) in lines.iter().enumerate() {
         ip_to_idx.insert(l.ip, i);
@@ -436,7 +385,6 @@ fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8]) -> (Vec<DisasmLine>, DisasmM
         }
     }
 
-    // Assign visual columns: smaller spans get inner columns (closer to instructions)
     arcs.sort_by_key(|a| {
         let lo = a.from.min(a.to);
         let hi = a.from.max(a.to);
@@ -449,7 +397,6 @@ fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8]) -> (Vec<DisasmLine>, DisasmM
         for j in 0..i {
             let jlo = arcs[j].from.min(arcs[j].to);
             let jhi = arcs[j].from.max(arcs[j].to);
-            // Overlapping spans compete for columns
             if jlo <= hi && jhi >= lo {
                 let c = arcs[j].col as usize;
                 if c < used.len() { used[c] = true; }
@@ -463,22 +410,17 @@ fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8]) -> (Vec<DisasmLine>, DisasmM
     (lines, meta)
 }
 
-/// Split Intel-formatted output into (opcode, operands).
-/// E.g. "push rbp" -> ("push", "rbp"), "call qword ptr [rax+10h]" -> ("call", "qword ptr [rax+10h]")
 fn split_opcode_operands(text: &str) -> (&str, &str) {
-    // Prefix instructions like "rep stosb" or "lock xadd" — first space after the opcode
     match text.find(' ') {
         Some(pos) => (&text[..pos], text[pos + 1..].trim_start()),
         None      => (text, ""),
     }
 }
 
-/// Build a VA -> string preview map from extracted strings for inline disasm comments.
 fn build_string_va_map(pe: &PeInfo) -> std::collections::HashMap<u64, String> {
     let mut map = std::collections::HashMap::new();
     for s in &pe.sections {
         for es in &pe.strings {
-            // Map file offset to VA: if string's offset falls within this section's raw range
             let s_file_off = es.offset;
             let sec_raw_start = s.raw_offset as usize;
             let sec_raw_end   = sec_raw_start + s.raw_size as usize;
@@ -497,8 +439,6 @@ fn build_string_va_map(pe: &PeInfo) -> std::collections::HashMap<u64, String> {
     map
 }
 
-/// Build an auto-generated comment for a disassembly line.
-/// Resolves IAT symbols and string references from operand addresses.
 fn build_comment(
     instr: &Instruction,
     iat_map: &std::collections::HashMap<u64, String>,
@@ -506,26 +446,20 @@ fn build_comment(
     target: Option<u64>,
     _bitness: u32,
 ) -> String {
-    // For call/jmp with memory operand [addr], check IAT
-    // iced-x86: memory displacement gives the address in brackets
     let mem_disp = instr.memory_displacement64();
 
-    // Check IAT for memory operand (call [IAT_entry])
     if mem_disp != 0 {
         if let Some(sym) = iat_map.get(&mem_disp) {
             return sym.clone();
         }
     }
 
-    // Check direct target for IAT (rare but possible)
     if let Some(t) = target {
         if let Some(sym) = iat_map.get(&t) {
             return sym.clone();
         }
     }
 
-    // Check for immediate values that reference strings
-    // Look at memory displacement and immediates
     for addr in [mem_disp, instr.immediate64()] {
         if addr != 0 {
             if let Some(s) = string_map.get(&addr) {
@@ -537,15 +471,11 @@ fn build_comment(
     String::new()
 }
 
-/// Detect common function prologue patterns at instruction index `idx`.
 fn detect_prologue(instrs: &[Instruction], idx: usize, bitness: u32) -> bool {
     let instr = &instrs[idx];
     let code = instr.code();
     let code_val = code as u32;
 
-    // Pattern 1: push rbp / push ebp
-    // iced-x86 Code::Push_r64 for push rbp, Code::Push_r32 for push ebp
-    // Check the raw mnemonic: push rbp/ebp followed by mov rbp,rsp / mov ebp,esp
     let is_push_bp = {
         let op_count = instr.op_count();
         if op_count >= 1 {
@@ -560,7 +490,6 @@ fn detect_prologue(instrs: &[Instruction], idx: usize, bitness: u32) -> bool {
     };
 
     if is_push_bp {
-        // Check if next instruction is mov rbp/ebp, rsp/esp
         if idx + 1 < instrs.len() {
             let next = &instrs[idx + 1];
             let nreg0 = next.op0_register();
@@ -574,13 +503,10 @@ fn detect_prologue(instrs: &[Instruction], idx: usize, bitness: u32) -> bool {
         }
     }
 
-    // Pattern 2 (x64 leaf): sub rsp, imm  as first meaningful instruction
     if bitness == 64 && idx > 0 {
         let reg = instr.op0_register();
         use iced_x86::Register;
         if reg == Register::RSP && instr.op_count() >= 2 {
-            // Check if previous instruction was a ret (function boundary)
-            // or if this is at a call target
             if idx > 0 && instrs[idx - 1].flow_control() == FlowControl::Return {
                 return true;
             }
@@ -592,8 +518,6 @@ fn detect_prologue(instrs: &[Instruction], idx: usize, bitness: u32) -> bool {
 
 #[inline]
 fn is_push_code(_code_val: u32) -> bool {
-    // Caller already verified register is RBP/EBP and flow is Next — that's sufficient
-    // to confirm this is a push-register instruction. No need to enumerate Code variants.
     true
 }
 
@@ -620,8 +544,6 @@ fn rva_to_file_offset_sections(pe: &PeInfo, rva: u32) -> Option<usize> {
     None
 }
 
-// ── Resource Extraction ──────────────────────────────────────────────────────
-
 fn parse_resources(pe: &VecPE, buffer: &[u8]) -> Option<ResourceInfo> {
     let dd = pe.get_data_directory(exe::ImageDirectoryEntry::Resource).ok()?;
     let rsrc_rva = dd.virtual_address.0;
@@ -635,7 +557,6 @@ fn parse_resources(pe: &VecPE, buffer: &[u8]) -> Option<ResourceInfo> {
         has_icon: false, resource_types: Vec::new(),
     };
 
-    // Parse level 1 directory (resource types)
     let num_named = unsafe { read_u16_le(buffer, rsrc_off + 12) } as usize;
     let num_id    = unsafe { read_u16_le(buffer, rsrc_off + 14) } as usize;
     let total = (num_named + num_id).min(64);
@@ -663,7 +584,6 @@ fn parse_resources(pe: &VecPE, buffer: &[u8]) -> Option<ResourceInfo> {
             14 => { info.has_icon = true; }
             24 => {
                 info.has_manifest = true;
-                // Walk level 2 + 3 to find the actual data
                 if offset_val & 0x8000_0000 != 0 {
                     let l2_off = rsrc_off + (offset_val & 0x7FFF_FFFF) as usize;
                     if let Some(data) = walk_resource_to_data(buffer, rsrc_off, l2_off) {
@@ -690,8 +610,6 @@ fn parse_resources(pe: &VecPE, buffer: &[u8]) -> Option<ResourceInfo> {
     Some(info)
 }
 
-/// Walk a level-2 resource directory to reach the leaf data entry.
-/// Returns a slice of the raw resource data.
 fn walk_resource_to_data<'a>(buffer: &'a [u8], rsrc_off: usize, l2_off: usize) -> Option<&'a [u8]> {
     if l2_off + 16 > buffer.len() { return None; }
     let num2 = (unsafe { read_u16_le(buffer, l2_off + 12) } as usize
@@ -702,7 +620,6 @@ fn walk_resource_to_data<'a>(buffer: &'a [u8], rsrc_off: usize, l2_off: usize) -
     if e2_off + 8 > buffer.len() { return None; }
     let offset2 = unsafe { read_u32_le(buffer, e2_off + 4) };
 
-    // Level 3 (language)
     if offset2 & 0x8000_0000 != 0 {
         let l3_off = rsrc_off + (offset2 & 0x7FFF_FFFF) as usize;
         if l3_off + 16 > buffer.len() { return None; }
@@ -716,30 +633,25 @@ fn walk_resource_to_data<'a>(buffer: &'a [u8], rsrc_off: usize, l2_off: usize) -
         return read_resource_data_entry(buffer, rsrc_off + data_entry_off as usize);
     }
 
-    // Direct data entry
     read_resource_data_entry(buffer, rsrc_off + offset2 as usize)
 }
 
-/// Read an IMAGE_RESOURCE_DATA_ENTRY and return the referenced data slice.
 fn read_resource_data_entry<'a>(buffer: &'a [u8], entry_off: usize) -> Option<&'a [u8]> {
     if entry_off + 16 > buffer.len() { return None; }
     let data_rva  = unsafe { read_u32_le(buffer, entry_off) };
     let data_size = unsafe { read_u32_le(buffer, entry_off + 4) } as usize;
     if data_size == 0 || data_size > buffer.len() { return None; }
 
-    // Try to resolve RVA by scanning section headers from the PE header
     let file_off = rva_to_offset_raw(buffer, data_rva)?;
     if file_off + data_size > buffer.len() { return None; }
     Some(&buffer[file_off..file_off + data_size])
 }
 
-/// Standalone RVA-to-file-offset that works on raw buffer without VecPE.
 fn rva_to_offset_raw(buffer: &[u8], rva: u32) -> Option<usize> {
     if buffer.len() < 64 { return None; }
     let pe_off = unsafe { read_u32_le(buffer, 0x3C) } as usize;
     if pe_off + 6 > buffer.len() { return None; }
     let num_sections = unsafe { read_u16_le(buffer, pe_off + 6) } as usize;
-    // Determine optional header size to find section table
     let opt_hdr_size = unsafe { read_u16_le(buffer, pe_off + 20) } as usize;
     let sec_table = pe_off + 24 + opt_hdr_size;
 
@@ -758,9 +670,7 @@ fn rva_to_offset_raw(buffer: &[u8], rva: u32) -> Option<usize> {
     None
 }
 
-/// Parse VS_VERSIONINFO / VS_FIXEDFILEINFO from resource data.
 fn parse_version_info(data: &[u8]) -> Option<VersionInfo> {
-    // VS_FIXEDFILEINFO signature is 0xFEEF04BD
     let sig_pos = data.windows(4).position(|w| {
         w == [0xBD, 0x04, 0xEF, 0xFE]
     })?;
@@ -776,7 +686,6 @@ fn parse_version_info(data: &[u8]) -> Option<VersionInfo> {
     let product_version = format!("{}.{}.{}.{}",
         ms_prod >> 16, ms_prod & 0xFFFF, ls_prod >> 16, ls_prod & 0xFFFF);
 
-    // Scan for StringFileInfo key-value pairs (UTF-16 LE encoded)
     let company_name      = find_version_string(data, "CompanyName");
     let file_description  = find_version_string(data, "FileDescription");
     let original_filename = find_version_string(data, "OriginalFilename");
@@ -784,16 +693,13 @@ fn parse_version_info(data: &[u8]) -> Option<VersionInfo> {
     Some(VersionInfo { file_version, product_version, company_name, file_description, original_filename })
 }
 
-/// Find a UTF-16 LE encoded version string key and extract its value.
 fn find_version_string(data: &[u8], key: &str) -> Option<String> {
     let key_utf16: Vec<u8> = key.encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
     let pos = data.windows(key_utf16.len()).position(|w| w == key_utf16.as_slice())?;
-    // Value follows after key + null terminator, aligned to 4 bytes
     let after_key = pos + key_utf16.len() + 2; // +2 for UTF-16 null
     let aligned = (after_key + 3) & !3;
     if aligned + 2 > data.len() { return None; }
 
-    // Read UTF-16 LE string until null
     let mut chars = Vec::new();
     let mut i = aligned;
     while i + 1 < data.len() {
@@ -808,11 +714,8 @@ fn find_version_string(data: &[u8], key: &str) -> Option<String> {
     Some(String::from_utf16_lossy(&chars))
 }
 
-// ── Certificate ──────────────────────────────────────────────────────────────
-
 fn parse_certificate(pe: &VecPE, buffer: &[u8]) -> Option<CertificateInfo> {
     let dd = pe.get_data_directory(exe::ImageDirectoryEntry::Security).ok()?;
-    // NOTE: Security directory uses FILE OFFSET, not RVA
     let offset = dd.virtual_address.0;
     let size = dd.size;
     if offset == 0 || size == 0 { return None; }
@@ -834,8 +737,6 @@ fn parse_certificate(pe: &VecPE, buffer: &[u8]) -> Option<CertificateInfo> {
     Some(CertificateInfo { offset, size, revision: w_revision, cert_type: w_cert_type, type_label })
 }
 
-// ── Import Parsing ───────────────────────────────────────────────────────────
-
 fn parse_imports(pe: &VecPE, buffer: &[u8], is_64: bool) -> Vec<ImportInfo> {
     let mut result = Vec::new();
 
@@ -855,7 +756,6 @@ fn parse_imports(pe: &VecPE, buffer: &[u8], is_64: bool) -> Vec<ImportInfo> {
     loop {
         if desc_offset + 20 > buffer.len() { break; }
 
-        // SAFETY: bounds verified above — desc_offset + 20 <= buffer.len()
         let name_rva    = unsafe { read_u32_le(buffer, desc_offset + 12) };
         let thunk_rva   = unsafe { read_u32_le(buffer, desc_offset) };
         let first_thunk = unsafe { read_u32_le(buffer, desc_offset + 16) };
@@ -879,7 +779,6 @@ fn parse_imports(pe: &VecPE, buffer: &[u8], is_64: bool) -> Vec<ImportInfo> {
                 let ordinal_flag: u64 = if is_64 { 0x8000_0000_0000_0000 } else { 0x8000_0000 };
                 loop {
                     if thunk_off + thunk_size > buffer.len() { break; }
-                    // SAFETY: bounds verified above
                     let val: u64 = unsafe {
                         if is_64 { read_u64_le(buffer, thunk_off) }
                         else     { read_u32_le(buffer, thunk_off) as u64 }
@@ -908,8 +807,6 @@ fn parse_imports(pe: &VecPE, buffer: &[u8], is_64: bool) -> Vec<ImportInfo> {
     result
 }
 
-/// Build a map from IAT entry VA to "DLL!Function" for disassembly symbol resolution.
-/// Each entry in the FirstThunk array gets mapped: VA = image_base + first_thunk_rva + i * thunk_size.
 fn build_iat_map(pe: &VecPE, buffer: &[u8], is_64: bool, image_base: u64) -> std::collections::HashMap<u64, String> {
     let mut map = std::collections::HashMap::new();
 
@@ -931,8 +828,8 @@ fn build_iat_map(pe: &VecPE, buffer: &[u8], is_64: bool, image_base: u64) -> std
     loop {
         if desc_offset + 20 > buffer.len() { break; }
         let name_rva    = unsafe { read_u32_le(buffer, desc_offset + 12) };
-        let thunk_rva   = unsafe { read_u32_le(buffer, desc_offset) };      // OriginalFirstThunk (ILT)
-        let first_thunk = unsafe { read_u32_le(buffer, desc_offset + 16) }; // FirstThunk (IAT)
+        let thunk_rva   = unsafe { read_u32_le(buffer, desc_offset) };
+        let first_thunk = unsafe { read_u32_le(buffer, desc_offset + 16) };
 
         if name_rva == 0 && thunk_rva == 0 && first_thunk == 0 { break; }
 
@@ -944,7 +841,6 @@ fn build_iat_map(pe: &VecPE, buffer: &[u8], is_64: bool, image_base: u64) -> std
             String::new()
         };
 
-        // Walk the ILT (or IAT if ILT is absent) to get names, but use FirstThunk RVAs for VA mapping
         let name_thunk_start = if thunk_rva != 0 { thunk_rva } else { first_thunk };
         let iat_rva_start = first_thunk;
 
@@ -1000,8 +896,6 @@ fn rva_to_offset(pe: &VecPE, rva: u32) -> Option<usize> {
     None
 }
 
-/// Read a null-terminated C string from a buffer at the given offset.
-/// Uses unsafe pointer arithmetic to avoid redundant bounds checks on the inner loop.
 #[inline]
 fn read_cstring(data: &[u8], offset: usize) -> String {
     if offset >= data.len() { return String::new(); }
@@ -1013,11 +907,8 @@ fn read_cstring(data: &[u8], offset: usize) -> String {
         while p < end && *p != 0 { p = p.add(1); }
         p.offset_from(ptr) as usize
     };
-    // SAFETY: all bytes in [offset..offset+len] are valid (non-null, within bounds)
     String::from_utf8_lossy(&slice[..len]).into_owned()
 }
-
-// ── String Extraction ────────────────────────────────────────────────────────
 
 fn extract_strings(data: &[u8], base_offset: usize, section: &str) -> Vec<ExtractedString> {
     const MIN_LEN: usize = 5;
@@ -1025,7 +916,6 @@ fn extract_strings(data: &[u8], base_offset: usize, section: &str) -> Vec<Extrac
     let mut results = Vec::new();
     let sec = section.to_string();
 
-    // ASCII extraction — raw pointer scan for speed on large sections
     {
         let ptr = data.as_ptr();
         let mut i = 0usize;
@@ -1033,7 +923,6 @@ fn extract_strings(data: &[u8], base_offset: usize, section: &str) -> Vec<Extrac
         let mut in_run = false;
 
         while i < len {
-            // SAFETY: i < len, so ptr.add(i) is within bounds
             let b = unsafe { *ptr.add(i) };
             let printable = b.is_ascii_graphic() || b == b' ' || b == b'\t';
             if printable {
@@ -1041,7 +930,6 @@ fn extract_strings(data: &[u8], base_offset: usize, section: &str) -> Vec<Extrac
             } else if in_run {
                 let run_len = i - run_start;
                 if run_len >= MIN_LEN {
-                    // SAFETY: run_start..i is within data bounds
                     let slice = unsafe { std::slice::from_raw_parts(ptr.add(run_start), run_len) };
                     let value = String::from_utf8_lossy(slice).into_owned();
                     let kind = classify_string(&value);
@@ -1059,7 +947,6 @@ fn extract_strings(data: &[u8], base_offset: usize, section: &str) -> Vec<Extrac
         }
     }
 
-    // Wide (UTF-16 LE) extraction — O(1) dedup via HashSet snapshot of ASCII results
     {
         let seen: HashSet<String> = results.iter().map(|r| r.value.clone()).collect();
         let mut wstart: Option<usize> = None;
@@ -1068,7 +955,6 @@ fn extract_strings(data: &[u8], base_offset: usize, section: &str) -> Vec<Extrac
         let aligned_end = len & !1;
 
         while i < aligned_end {
-            // SAFETY: i+1 < len because aligned_end is even and i steps by 2
             let lo = unsafe { *data.get_unchecked(i) };
             let hi = unsafe { *data.get_unchecked(i + 1) };
             let printable = hi == 0 && ((lo >= 0x20 && lo <= 0x7E) || lo == 0x09);
@@ -1077,7 +963,6 @@ fn extract_strings(data: &[u8], base_offset: usize, section: &str) -> Vec<Extrac
                 wbuf.push(lo);
             } else if let Some(ws) = wstart.take() {
                 if wbuf.len() >= MIN_LEN {
-                    // SAFETY: all bytes in wbuf are valid ASCII
                     let value = unsafe { String::from_utf8_unchecked(wbuf.clone()) };
                     if !seen.contains(value.as_str()) {
                         let kind = if classify_string(&value) == StringKind::Obfuscated { StringKind::Obfuscated } else { StringKind::Wide };
@@ -1093,16 +978,12 @@ fn extract_strings(data: &[u8], base_offset: usize, section: &str) -> Vec<Extrac
     results
 }
 
-// ── String Classification ────────────────────────────────────────────────────
-
-/// Byte-level statistics gathered in a single pass over the string.
 struct ByteStats {
     alpha:  u32,
     digits: u32,
     all_numeric_like: bool,
 }
 
-/// Single-pass byte analysis using unsafe pointer arithmetic.
 #[inline]
 fn byte_stats(s: &str) -> ByteStats {
     let len = s.len();
@@ -1340,8 +1221,6 @@ fn shannon_entropy_bytes(data: &[u8]) -> f32 {
     }
     ent as f32
 }
-
-// ── PE Structure Helpers ─────────────────────────────────────────────────────
 
 fn subsystem_name(sub: u16) -> String {
     match sub {

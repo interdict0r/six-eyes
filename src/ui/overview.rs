@@ -10,7 +10,6 @@ pub fn render_overview(ui: &mut Ui, pe: &PeInfo, score: u8) {
         let margin = egui::Margin::symmetric(14.0, 10.0);
         egui::Frame::none().inner_margin(margin).show(ui, |ui| {
 
-        // 1. Quick Summary
         let sc = score_color(score);
         section_card(ui, |ui| {
             ui.horizontal(|ui| {
@@ -57,7 +56,6 @@ pub fn render_overview(ui: &mut Ui, pe: &PeInfo, score: u8) {
         });
         ui.add_space(16.0);
 
-        // 2. Security Flags
         section_header(ui, "Security Flags");
         section_card(ui, |ui| {
             if pe.dll_chars.is_empty() {
@@ -80,7 +78,6 @@ pub fn render_overview(ui: &mut Ui, pe: &PeInfo, score: u8) {
         });
         ui.add_space(16.0);
 
-        // 3. PE Identity
         section_header(ui, "PE Identity");
         section_card(ui, |ui| {
             grid(ui, "ov_pe", |ui| {
@@ -120,7 +117,6 @@ pub fn render_overview(ui: &mut Ui, pe: &PeInfo, score: u8) {
         });
         ui.add_space(16.0);
 
-        // Go/Rust expanded info (collapsible)
         if let Some(go) = &pe.go_info {
             if !go.functions.is_empty() {
                 ui.collapsing(RichText::new(format!("Go Symbols  ({})", go.functions.len())).strong().color(Color32::from_rgb(140,190,255)).size(14.0), |ui| {
@@ -149,7 +145,6 @@ pub fn render_overview(ui: &mut Ui, pe: &PeInfo, score: u8) {
             }
         }
 
-        // 4. Sections
         section_header(ui, "Sections");
         section_card(ui, |ui| {
             let bar_max = (ui.available_width() - 300.0).max(80.0);
@@ -194,7 +189,6 @@ pub fn render_overview(ui: &mut Ui, pe: &PeInfo, score: u8) {
         });
         ui.add_space(16.0);
 
-        // 4b. Entropy Heatmap
         if !pe.block_entropy.is_empty() {
             section_header(ui, "Entropy Heatmap");
             section_card(ui, |ui| {
@@ -215,7 +209,6 @@ pub fn render_overview(ui: &mut Ui, pe: &PeInfo, score: u8) {
                 }
                 ui.painter().rect_stroke(rect, 0.0, Stroke::new(1.0, Color32::from_rgb(50,52,60)));
 
-                // Hover tooltip
                 if resp.hovered() {
                     if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
                         if rect.contains(pos) {
@@ -244,7 +237,6 @@ pub fn render_overview(ui: &mut Ui, pe: &PeInfo, score: u8) {
             ui.add_space(16.0);
         }
 
-        // 4c. Exports
         if let Some(ref exp) = pe.exports {
             if !exp.exports.is_empty() {
                 section_header(ui, "Exports");
@@ -281,7 +273,6 @@ pub fn render_overview(ui: &mut Ui, pe: &PeInfo, score: u8) {
             }
         }
 
-        // 4d. Resources
         if let Some(ref res) = pe.resources {
             section_header(ui, "Resources");
             section_card(ui, |ui| {
@@ -310,7 +301,6 @@ pub fn render_overview(ui: &mut Ui, pe: &PeInfo, score: u8) {
             ui.add_space(16.0);
         }
 
-        // 5. Integrity & Stats
         section_header(ui, "Integrity & Stats");
         section_card(ui, |ui| {
             grid(ui, "ov_int", |ui| {
@@ -354,7 +344,6 @@ pub fn render_overview(ui: &mut Ui, pe: &PeInfo, score: u8) {
         });
         ui.add_space(16.0);
 
-        // 6. File & Hashes
         section_header(ui, "File");
         section_card(ui, |ui| {
             grid(ui, "ov_file", |ui| {
@@ -367,6 +356,6 @@ pub fn render_overview(ui: &mut Ui, pe: &PeInfo, score: u8) {
             });
         });
 
-        }); // end inner Frame
+        });
     });
 }
