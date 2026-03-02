@@ -1,8 +1,6 @@
-# Six Eyes
+# six eyes
 
-A Windows PE (Portable Executable) static analysis tool built in Rust. It parses `.exe`, `.dll`, `.sys`, `.ocx`, and `.scr` files and presents the results across six analysis tabs in a custom desktop GUI.
-
-All analysis runs locally — hashing, disassembly, heuristics, and string extraction are handled without external services or network calls.
+A Windows PE (Portable Executable) static analysis tool built in Rust. It parses `.exe`, `.dll`, `.sys`, `.ocx`, and `.scr` files and presents the results across six analysis tabs.
 
 ![Rust](https://img.shields.io/badge/Rust-2024_Edition-orange)
 ![Platform](https://img.shields.io/badge/Platform-Windows-blue)
@@ -12,9 +10,9 @@ All analysis runs locally — hashing, disassembly, heuristics, and string extra
 ## Features
 
 ### Overview
-- File hashes: MD5, SHA-256, ImpHash, RichHash (all implemented from scratch, zero crypto dependencies)
+- File hashes: MD5, SHA-256, ImpHash, RichHash
 - PE metadata: architecture, subsystem, entry point, image base, linker/OS versions, timestamps
-- Security flags: ASLR, DEP, CFG, NX, SEH — displayed as color-coded badges
+- Security flags: ASLR, DEP, CFG, NX, SEH displayed as color-coded badges
 - Section table with entropy bars, sizes, and characteristics
 - Full-file entropy heatmap (1KB block resolution)
 - Exports table, resources (manifest, version info), overlay detection
