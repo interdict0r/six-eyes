@@ -311,8 +311,13 @@ pub fn render_disasm(
                 let gutter_left = ui.cursor().min.x;
                 if s_show_arcs && !search_active {
                     ui.add_space(ARC_COL_W);
+                    ui.add_space(6.0); // gap so arc endings don't overlap hex data
                 }
-                let gutter_right = ui.cursor().min.x;
+                let gutter_right = if s_show_arcs && !search_active {
+                    ui.cursor().min.x - 6.0 // right edge excludes the gap
+                } else {
+                    ui.cursor().min.x
+                };
                 arc_gutter_left_x = gutter_left;
                 arc_gutter_right_x = gutter_right;
 
@@ -368,7 +373,7 @@ pub fn render_disasm(
                 // Paint arc endpoint stripe markers at the right edge of the gutter
                 for (&line_idx, &(is_src, is_dst, color)) in &arc_endpoints {
                     if let Some(&cy) = idx_to_y.get(&line_idx) {
-                        let marker_x = right_edge - 3.0;
+                        let marker_x = right_edge - 6.0;
                         let marker_top = cy - row_height * 0.5;
                         if is_dst {
                             painter.rect_filled(
@@ -422,10 +427,12 @@ pub fn render_disasm(
                     let vert_resp = ui.interact(vert_hit, arc_id, egui::Sense::click());
                     let hovered = vert_resp.hovered();
 
+                    let arc_end = right_edge - 3.0;
+
                     let from_hovered = if idx_to_y.contains_key(&arc.from) {
                         let tick_hit = Rect::from_min_max(
                             Pos2::new(col_x, from_y - 2.0),
-                            Pos2::new(right_edge, from_y + 2.0),
+                            Pos2::new(arc_end, from_y + 2.0),
                         );
                         let r = ui.interact(tick_hit, arc_id.with("from"), egui::Sense::click());
                         if r.clicked() { *scroll_to = Some(arc.to); }
@@ -435,7 +442,7 @@ pub fn render_disasm(
                     let to_hovered = if idx_to_y.contains_key(&arc.to) {
                         let tick_hit = Rect::from_min_max(
                             Pos2::new(col_x, to_y - 2.0),
-                            Pos2::new(right_edge, to_y + 2.0),
+                            Pos2::new(arc_end, to_y + 2.0),
                         );
                         let r = ui.interact(tick_hit, arc_id.with("to"), egui::Sense::click());
                         if r.clicked() { *scroll_to = Some(arc.from); }
@@ -446,14 +453,14 @@ pub fn render_disasm(
                     let draw_color = if any_hover { brighten(color, 80) } else { color };
                     let stroke = Stroke::new(if any_hover { 1.5 } else { 1.0 }, draw_color);
 
-                    // Source horizontal tick (col_x -> right_edge)
+                    // Source horizontal tick (col_x -> arc_end)
                     if idx_to_y.contains_key(&arc.from) {
                         if is_dashed {
-                            draw_dashed_hline(&painter, from_y, col_x, right_edge, stroke, 3.0, 2.0);
+                            draw_dashed_hline(&painter, from_y, col_x, arc_end, stroke, 3.0, 2.0);
                         } else {
-                            painter.line_segment([Pos2::new(col_x, from_y), Pos2::new(right_edge, from_y)], stroke);
+                            painter.line_segment([Pos2::new(col_x, from_y), Pos2::new(arc_end, from_y)], stroke);
                         }
-                        painter.circle_filled(Pos2::new(right_edge, from_y), 2.0, draw_color);
+                        painter.circle_filled(Pos2::new(arc_end, from_y), 2.0, draw_color);
                     }
 
                     // Vertical line
@@ -466,11 +473,11 @@ pub fn render_disasm(
                     // Target horizontal tick + arrowhead (pointing right toward instructions)
                     if idx_to_y.contains_key(&arc.to) {
                         if is_dashed {
-                            draw_dashed_hline(&painter, to_y, col_x, right_edge, stroke, 3.0, 2.0);
+                            draw_dashed_hline(&painter, to_y, col_x, arc_end, stroke, 3.0, 2.0);
                         } else {
-                            painter.line_segment([Pos2::new(col_x, to_y), Pos2::new(right_edge, to_y)], stroke);
+                            painter.line_segment([Pos2::new(col_x, to_y), Pos2::new(arc_end, to_y)], stroke);
                         }
-                        let ax = right_edge;
+                        let ax = arc_end;
                         let ay = to_y;
                         painter.line_segment([Pos2::new(ax - 4.0, ay - 3.0), Pos2::new(ax, ay)], stroke);
                         painter.line_segment([Pos2::new(ax - 4.0, ay + 3.0), Pos2::new(ax, ay)], stroke);
