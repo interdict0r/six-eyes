@@ -12,6 +12,8 @@ env:
 jobs:
   build:
     runs-on: windows-latest
+    permissions:
+      contents: write
 
     steps:
       - uses: actions/checkout@v4
@@ -37,3 +39,18 @@ jobs:
         with:
           name: six-eyes
           path: target/release/six-eyes.exe
+
+      - name: Get short SHA
+        if: github.event_name == 'push'
+        id: sha
+        shell: bash
+        run: echo "short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Create release
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ steps.sha.outputs.short }}
+          name: Build ${{ steps.sha.outputs.short }}
+          files: target/release/six-eyes.exe
+          make_latest: true
