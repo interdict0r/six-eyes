@@ -1,3 +1,4 @@
+use std::rc::Rc;
 use eframe::egui::Color32;
 
 #[derive(Default)]
@@ -175,7 +176,7 @@ pub struct ExtractedString {
     pub value:   String,
     pub offset:  u32,
     pub kind:    StringKind,
-    pub section: String,
+    pub section: Rc<str>,
 }
 
 #[derive(PartialEq, Clone, Copy)]

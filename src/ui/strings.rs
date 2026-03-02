@@ -2,8 +2,16 @@ use eframe::egui::{self, Color32, RichText, Ui};
 use egui_extras::{TableBuilder, Column};
 use crate::model::*;
 
+#[inline]
+fn ascii_contains_ci(haystack: &str, needle: &str) -> bool {
+    if needle.len() > haystack.len() { return false; }
+    haystack.as_bytes().windows(needle.len()).any(|w|
+        w.iter().zip(needle.as_bytes()).all(|(a, b)| a.to_ascii_lowercase() == *b)
+    )
+}
+
 pub fn render_strings(ui: &mut Ui, pe: &PeInfo, filter: &mut String, kind_filter: &mut StringKindFilter) {
-    let fl = filter.to_lowercase();
+    let fl = filter.to_ascii_lowercase();
     let visible: Vec<&ExtractedString> = pe.strings.iter().filter(|s| {
         let ko = match kind_filter {
             StringKindFilter::All        => true,
@@ -11,7 +19,7 @@ pub fn render_strings(ui: &mut Ui, pe: &PeInfo, filter: &mut String, kind_filter
             StringKindFilter::Wide       => s.kind == StringKind::Wide,
             StringKindFilter::Obfuscated => s.kind == StringKind::Obfuscated,
         };
-        ko && (fl.is_empty() || s.value.to_lowercase().contains(&fl))
+        ko && (fl.is_empty() || ascii_contains_ci(&s.value, &fl))
     }).collect();
 
     let normal: Vec<&ExtractedString> = visible.iter().copied().filter(|s| s.kind != StringKind::Obfuscated).collect();
@@ -81,11 +89,14 @@ fn string_table(ui: &mut Ui, strings: &[&ExtractedString]) {
             body.rows(18.0, strings.len(), |mut row| {
                 let s = strings[row.index()];
                 row.col(|ui| { ui.label(RichText::new(format!("0x{:08X}", s.offset)).monospace().size(12.0)); });
-                row.col(|ui| { ui.label(RichText::new(&s.section).monospace().size(12.0)); });
+                row.col(|ui| { ui.label(RichText::new(&*s.section).monospace().size(12.0)); });
                 row.col(|ui| { ui.label(RichText::new(s.kind.label()).color(s.kind.color()).size(12.0)); });
                 row.col(|ui| {
-                    let d = if s.value.len() > 120 { format!("{}...", &s.value[..120]) } else { s.value.clone() };
-                    ui.label(RichText::new(d).monospace().size(12.0));
+                    if s.value.len() > 120 {
+                        ui.label(RichText::new(format!("{}...", &s.value[..120])).monospace().size(12.0));
+                    } else {
+                        ui.label(RichText::new(&s.value).monospace().size(12.0));
+                    }
                 });
             });
         });

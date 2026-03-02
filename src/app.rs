@@ -69,9 +69,13 @@ impl SixEyesApp {
 
 fn compute_threat_score(flags: &[crate::heuristics::HeuristicFlag]) -> u8 {
     use crate::heuristics::Severity;
-    let crits = flags.iter().filter(|f| f.severity == Severity::Critical).count();
-    let warns = flags.iter().filter(|f| f.severity == Severity::Warn).count();
-    let infos = flags.iter().filter(|f| f.severity == Severity::Info).count();
+    let (crits, warns, infos) = flags.iter().fold((0usize, 0usize, 0usize), |(c, w, i), f| {
+        match f.severity {
+            Severity::Critical => (c + 1, w, i),
+            Severity::Warn     => (c, w + 1, i),
+            Severity::Info     => (c, w, i + 1),
+        }
+    });
     (crits * 25 + warns * 10 + infos * 2).min(100) as u8
 }
 

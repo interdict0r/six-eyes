@@ -83,22 +83,27 @@ pub fn detect_language(pe: &PeInfo, buffer: &[u8]) -> Option<String> {
         return Some(".NET (CLR)".into());
     }
 
-    {
-        let has_go_strings = pe.strings.iter().any(|s|
-            s.value.contains("runtime.main")
-            || s.value.contains("go.buildid")
-            || s.value.contains("runtime/internal/")
-            || s.value.contains("runtime.goexit")
-        );
-        let has_pclntab = validate_pclntab(buffer);
-        if has_go_strings || has_pclntab {
-            return Some("Go".into());
-        }
+    let (mut has_go, mut has_rust, mut has_python, mut has_autoit, mut has_nim, mut has_mingw) =
+        (false, false, false, false, false, false);
+
+    for s in &pe.strings {
+        let v = &s.value;
+        if !has_go && (v.contains("runtime.main") || v.contains("go.buildid")
+            || v.contains("runtime/internal/") || v.contains("runtime.goexit")) { has_go = true; }
+        if !has_rust && (v.contains("/rustc/") || v.contains(".cargo/registry")
+            || v.contains("core::panicking")) { has_rust = true; }
+        if !has_python && (v.contains("_pyi_main_co") || v.contains("PYZ-00.pyz")) { has_python = true; }
+        if !has_autoit && (v.contains("AutoIt") || v.contains("AU3!")) { has_autoit = true; }
+        if !has_nim && (v.contains("nimMain") || v.contains("nim_program_result")) { has_nim = true; }
+        if !has_mingw && v.contains("__mingw") { has_mingw = true; }
+        if has_go && has_rust && has_python && has_autoit && has_nim && has_mingw { break; }
     }
 
-    if pe.strings.iter().any(|s|
-        s.value.contains("/rustc/") || s.value.contains(".cargo/registry") || s.value.contains("core::panicking")
-    ) {
+    if has_go || validate_pclntab(buffer) {
+        return Some("Go".into());
+    }
+
+    if has_rust {
         return Some("Rust".into());
     }
 
@@ -106,20 +111,19 @@ pub fn detect_language(pe: &PeInfo, buffer: &[u8]) -> Option<String> {
         return Some("Delphi/Borland".into());
     }
 
-    if pe.strings.iter().any(|s| s.value.contains("_pyi_main_co") || s.value.contains("PYZ-00.pyz")) {
+    if has_python {
         return Some("Python (PyInstaller)".into());
     }
 
-    if pe.strings.iter().any(|s| s.value.contains("AutoIt") || s.value.contains("AU3!")) {
+    if has_autoit {
         return Some("AutoIt".into());
     }
 
-    if pe.strings.iter().any(|s| s.value.contains("nimMain") || s.value.contains("nim_program_result")) {
+    if has_nim {
         return Some("Nim".into());
     }
 
-    if has_dll(pe, "msvcrt.dll")
-        && (pe.strings.iter().any(|s| s.value.contains("__mingw")) || sec_names.contains(".CRT")) {
+    if has_dll(pe, "msvcrt.dll") && (has_mingw || sec_names.contains(".CRT")) {
         return Some("C/C++ (GCC/MinGW)".into());
     }
 

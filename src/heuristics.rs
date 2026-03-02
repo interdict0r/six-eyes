@@ -137,7 +137,7 @@ pub struct MatchedCapability {
     pub description: &'static str,
     pub mitre:       &'static str,
     pub threat:      u8,
-    pub matched:     Vec<String>,
+    pub matched:     Vec<&'static str>,
 }
 
 pub fn detect_capabilities(pe: &PeInfo) -> Vec<MatchedCapability> {
@@ -145,9 +145,9 @@ pub fn detect_capabilities(pe: &PeInfo) -> Vec<MatchedCapability> {
         .flat_map(|i| i.functions.iter().map(|s| s.as_str())).collect();
     let mut caps = Vec::new();
     for def in CAPABILITIES {
-        let matched: Vec<String> = def.apis.iter()
+        let matched: Vec<&'static str> = def.apis.iter()
             .filter(|a| all_fns.contains(*a))
-            .map(|a| a.to_string()).collect();
+            .copied().collect();
         if !matched.is_empty() {
             caps.push(MatchedCapability {
                 name: def.name, description: def.description,
@@ -295,17 +295,18 @@ pub fn build_heuristic_flags(pe: &PeInfo) -> Vec<HeuristicFlag> {
         f!(Severity::Warn, "Structure", "Single section — likely packed");
     }
 
-    if !pe.dll_chars.iter().any(|f| f.contains("ASLR")) {
-        f!(Severity::Warn, "Security", "ASLR not enabled");
-    }
-    if !pe.dll_chars.iter().any(|f| f.contains("DEP")) {
-        f!(Severity::Warn, "Security", "DEP not enabled");
-    }
-    if !pe.dll_chars.iter().any(|f| f.contains("GUARD_CF")) {
-        f!(Severity::Info, "Security", "CFG not enabled");
-    }
-    if pe.dll_chars.iter().any(|f| f.contains("NO_SEH")) {
-        f!(Severity::Info, "Security", "SEH disabled");
+    {
+        let (mut has_aslr, mut has_dep, mut has_cfg, mut has_no_seh) = (false, false, false, false);
+        for dc in &pe.dll_chars {
+            if !has_aslr  && dc.contains("ASLR")     { has_aslr = true; }
+            if !has_dep   && dc.contains("DEP")       { has_dep = true; }
+            if !has_cfg   && dc.contains("GUARD_CF")  { has_cfg = true; }
+            if !has_no_seh && dc.contains("NO_SEH")   { has_no_seh = true; }
+        }
+        if !has_aslr { f!(Severity::Warn, "Security", "ASLR not enabled"); }
+        if !has_dep  { f!(Severity::Warn, "Security", "DEP not enabled"); }
+        if !has_cfg  { f!(Severity::Info, "Security", "CFG not enabled"); }
+        if has_no_seh { f!(Severity::Info, "Security", "SEH disabled"); }
     }
 
     if pe.rich_hint.is_none() {

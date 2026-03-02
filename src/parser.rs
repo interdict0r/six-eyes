@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::rc::Rc;
 use exe::pe::*;
 use iced_x86::{Decoder, DecoderOptions, FlowControl, Formatter, IntelFormatter, Instruction};
 use crate::model::*;
@@ -350,12 +351,17 @@ fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8]) -> (Vec<DisasmLine>, DisasmM
         });
     }
 
+    let mut ip_to_idx: std::collections::HashMap<u64, usize> = std::collections::HashMap::with_capacity(lines.len());
+    for (i, l) in lines.iter().enumerate() {
+        ip_to_idx.insert(l.ip, i);
+    }
+
     if meta.user_code.is_none() {
         for (idx, line) in lines.iter().enumerate() {
             if line.kind == InstrKind::Call {
                 if let Some(tgt) = line.target {
                     if tgt >= first_ip && tgt <= last_ip {
-                        if let Some(tgt_idx) = lines.iter().position(|l| l.ip == tgt) {
+                        if let Some(&tgt_idx) = ip_to_idx.get(&tgt) {
                             if lines[tgt_idx].is_prologue {
                                 if tgt_idx != 0 && idx > 0 {
                                     meta.user_code = Some(tgt_idx as u16);
@@ -367,11 +373,6 @@ fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8]) -> (Vec<DisasmLine>, DisasmM
                 }
             }
         }
-    }
-
-    let mut ip_to_idx: std::collections::HashMap<u64, usize> = std::collections::HashMap::with_capacity(lines.len());
-    for (i, l) in lines.iter().enumerate() {
-        ip_to_idx.insert(l.ip, i);
     }
 
     let mut arcs: Vec<BranchArc> = Vec::new();
@@ -393,16 +394,16 @@ fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8]) -> (Vec<DisasmLine>, DisasmM
     for i in 0..arcs.len() {
         let lo = arcs[i].from.min(arcs[i].to) as usize;
         let hi = arcs[i].from.max(arcs[i].to) as usize;
-        let mut used = [false; 12];
+        let mut used: u16 = 0;
         for j in 0..i {
             let jlo = arcs[j].from.min(arcs[j].to) as usize;
             let jhi = arcs[j].from.max(arcs[j].to) as usize;
             if jlo <= hi && jhi >= lo {
-                let c = arcs[j].col as usize;
-                if c < used.len() { used[c] = true; }
+                let c = arcs[j].col;
+                if c < 12 { used |= 1 << c; }
             }
         }
-        arcs[i].col = used.iter().position(|&u| !u).unwrap_or(0) as u8;
+        arcs[i].col = used.trailing_ones() as u8;
     }
 
     meta.arcs = arcs;
@@ -915,7 +916,7 @@ fn extract_strings(data: &[u8], base_offset: usize, section: &str) -> Vec<Extrac
     const MIN_LEN: usize = 5;
     let len = data.len();
     let mut results = Vec::new();
-    let sec = section.to_string();
+    let sec: Rc<str> = Rc::from(section);
 
     {
         let ptr = data.as_ptr();
@@ -964,7 +965,7 @@ fn extract_strings(data: &[u8], base_offset: usize, section: &str) -> Vec<Extrac
                 wbuf.push(lo);
             } else if let Some(ws) = wstart.take() {
                 if wbuf.len() >= MIN_LEN {
-                    let value = unsafe { String::from_utf8_unchecked(wbuf.clone()) };
+                    let value = unsafe { String::from_utf8_unchecked(std::mem::take(&mut wbuf)) };
                     if !seen.contains(value.as_str()) {
                         let kind = if classify_string(&value) == StringKind::Obfuscated { StringKind::Obfuscated } else { StringKind::Wide };
                         results.push(ExtractedString { value, offset: (base_offset + ws) as u32, kind, section: sec.clone() });

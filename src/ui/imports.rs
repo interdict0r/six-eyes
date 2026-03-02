@@ -55,7 +55,7 @@ pub fn render_imports(ui: &mut Ui, pe: &PeInfo) {
                                     .fill(Color32::from_rgb(40,40,50))
                                     .stroke(Stroke::new(0.5, Color32::from_rgb(70,70,80)))
                                     .show(ui, |ui| {
-                                        ui.label(RichText::new(api).monospace().size(11.0)
+                                        ui.label(RichText::new(*api).monospace().size(11.0)
                                             .color(suspicious_import_color(api)));
                                     });
                             }
