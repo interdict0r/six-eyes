@@ -46,6 +46,17 @@ jobs:
         shell: bash
         run: echo "short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
+      - name: Delete previous build release
+        if: github.event_name == 'push'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          prev=$(gh release list --limit 50 --json tagName -q '.[].tagName' | grep '^build-' | head -1)
+          if [ -n "$prev" ] && [ "$prev" != "build-${{ steps.sha.outputs.short }}" ]; then
+            gh release delete "$prev" --yes --cleanup-tag
+          fi
+
       - name: Create release
         if: github.event_name == 'push'
         uses: softprops/action-gh-release@v2
