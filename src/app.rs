@@ -72,7 +72,7 @@ fn compute_threat_score(flags: &[crate::heuristics::HeuristicFlag]) -> u8 {
     let crits = flags.iter().filter(|f| f.severity == Severity::Critical).count();
     let warns = flags.iter().filter(|f| f.severity == Severity::Warn).count();
     let infos = flags.iter().filter(|f| f.severity == Severity::Info).count();
-    ((crits * 25 + warns * 10 + infos * 2) as u8).min(100)
+    (crits * 25 + warns * 10 + infos * 2).min(100) as u8
 }
 
 impl eframe::App for SixEyesApp {

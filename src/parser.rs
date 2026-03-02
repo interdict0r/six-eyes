@@ -13,7 +13,7 @@ pub fn parse_pe(path: &str) -> PeInfo {
         Err(e) => { info.error = Some(format!("Failed to read file: {e}")); return info; }
     };
 
-    info.file_size = buffer.len();
+    info.file_size = buffer.len() as u32;
     info.md5       = md5_hex(&buffer);
     info.sha256    = sha256_hex(&buffer);
 
@@ -86,7 +86,7 @@ pub fn parse_pe(path: &str) -> PeInfo {
     }
 
     if (last_end as usize) < buffer.len() {
-        let size = buffer.len() - last_end as usize;
+        let size = (buffer.len() - last_end as usize) as u32;
         info.strings.extend(extract_strings(&buffer[last_end as usize..], last_end as usize, "overlay"));
         info.overlay = Some(OverlayInfo { offset: last_end, size });
     }
@@ -247,7 +247,7 @@ fn compute_block_entropy(buffer: &[u8], block_size: usize) -> Vec<f32> {
 }
 
 fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8]) -> (Vec<DisasmLine>, DisasmMeta) {
-    let empty = || (Vec::new(), DisasmMeta { calls: 0, jumps: 0, rets: 0, nops: 0, func_starts: Vec::new(), user_code: None, arcs: Vec::new() });
+    let empty = || (Vec::new(), DisasmMeta { calls: 0u16, jumps: 0u16, rets: 0u16, nops: 0u16, func_starts: Vec::new(), user_code: None, arcs: Vec::new() });
     if buffer.is_empty() { return empty(); }
 
     let ep_off = match find_ep_file_offset(pe) {
@@ -271,7 +271,7 @@ fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8]) -> (Vec<DisasmLine>, DisasmM
     let lut = HEX_LUT.as_ptr();
     let mut lines = Vec::with_capacity(instructions.len());
 
-    let mut meta = DisasmMeta { calls: 0, jumps: 0, rets: 0, nops: 0, func_starts: Vec::new(), user_code: None, arcs: Vec::new() };
+    let mut meta = DisasmMeta { calls: 0u16, jumps: 0u16, rets: 0u16, nops: 0u16, func_starts: Vec::new(), user_code: None, arcs: Vec::new() };
 
     let first_ip = instructions[0].ip();
     let last_ip  = instructions.last().map(|i| i.ip()).unwrap_or(first_ip);
@@ -337,7 +337,7 @@ fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8]) -> (Vec<DisasmLine>, DisasmM
         }
 
         if is_prologue {
-            meta.func_starts.push(idx);
+            meta.func_starts.push(idx as u16);
         }
 
         let comment = build_comment(instr, &pe.iat_map, &string_va_map, target, bitness);
@@ -358,7 +358,7 @@ fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8]) -> (Vec<DisasmLine>, DisasmM
                         if let Some(tgt_idx) = lines.iter().position(|l| l.ip == tgt) {
                             if lines[tgt_idx].is_prologue {
                                 if tgt_idx != 0 && idx > 0 {
-                                    meta.user_code = Some(tgt_idx);
+                                    meta.user_code = Some(tgt_idx as u16);
                                     break;
                                 }
                             }
@@ -379,7 +379,7 @@ fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8]) -> (Vec<DisasmLine>, DisasmM
         if matches!(line.kind, InstrKind::Call | InstrKind::Jump | InstrKind::CondJump) {
             if let Some(tgt) = line.target {
                 if let Some(&tgt_idx) = ip_to_idx.get(&tgt) {
-                    arcs.push(BranchArc { from: i, to: tgt_idx, kind: line.kind, col: 0 });
+                    arcs.push(BranchArc { from: i as u16, to: tgt_idx as u16, kind: line.kind, col: 0 });
                 }
             }
         }
@@ -391,12 +391,12 @@ fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8]) -> (Vec<DisasmLine>, DisasmM
         hi - lo
     });
     for i in 0..arcs.len() {
-        let lo = arcs[i].from.min(arcs[i].to);
-        let hi = arcs[i].from.max(arcs[i].to);
+        let lo = arcs[i].from.min(arcs[i].to) as usize;
+        let hi = arcs[i].from.max(arcs[i].to) as usize;
         let mut used = [false; 12];
         for j in 0..i {
-            let jlo = arcs[j].from.min(arcs[j].to);
-            let jhi = arcs[j].from.max(arcs[j].to);
+            let jlo = arcs[j].from.min(arcs[j].to) as usize;
+            let jhi = arcs[j].from.max(arcs[j].to) as usize;
             if jlo <= hi && jhi >= lo {
                 let c = arcs[j].col as usize;
                 if c < used.len() { used[c] = true; }
@@ -419,13 +419,13 @@ fn split_opcode_operands(text: &str) -> (&str, &str) {
 
 fn build_string_va_map(pe: &PeInfo) -> std::collections::HashMap<u64, String> {
     let mut map = std::collections::HashMap::new();
-    for s in &pe.sections {
-        for es in &pe.strings {
-            let s_file_off = es.offset;
-            let sec_raw_start = s.raw_offset as usize;
-            let sec_raw_end   = sec_raw_start + s.raw_size as usize;
-            if s_file_off >= sec_raw_start && s_file_off < sec_raw_end {
-                let rva = s.virtual_addr as u64 + (s_file_off - sec_raw_start) as u64;
+    for es in &pe.strings {
+        let off = es.offset;
+        for s in &pe.sections {
+            let sec_raw_start = s.raw_offset;
+            let sec_raw_end   = sec_raw_start + s.raw_size;
+            if off >= sec_raw_start && off < sec_raw_end {
+                let rva = s.virtual_addr as u64 + (off - sec_raw_start) as u64;
                 let va  = pe.image_base + rva;
                 let preview = if es.value.len() > 40 {
                     format!("\"{}...\"", &es.value[..40])
@@ -433,6 +433,7 @@ fn build_string_va_map(pe: &PeInfo) -> std::collections::HashMap<u64, String> {
                     format!("\"{}\"", es.value)
                 };
                 map.insert(va, preview);
+                break;
             }
         }
     }
@@ -933,7 +934,7 @@ fn extract_strings(data: &[u8], base_offset: usize, section: &str) -> Vec<Extrac
                     let slice = unsafe { std::slice::from_raw_parts(ptr.add(run_start), run_len) };
                     let value = String::from_utf8_lossy(slice).into_owned();
                     let kind = classify_string(&value);
-                    results.push(ExtractedString { value, offset: base_offset + run_start, kind, section: sec.clone() });
+                    results.push(ExtractedString { value, offset: (base_offset + run_start) as u32, kind, section: sec.clone() });
                 }
                 in_run = false;
             }
@@ -943,7 +944,7 @@ fn extract_strings(data: &[u8], base_offset: usize, section: &str) -> Vec<Extrac
             let slice = &data[run_start..];
             let value = String::from_utf8_lossy(slice).into_owned();
             let kind = classify_string(&value);
-            results.push(ExtractedString { value, offset: base_offset + run_start, kind, section: sec.clone() });
+            results.push(ExtractedString { value, offset: (base_offset + run_start) as u32, kind, section: sec.clone() });
         }
     }
 
@@ -966,7 +967,7 @@ fn extract_strings(data: &[u8], base_offset: usize, section: &str) -> Vec<Extrac
                     let value = unsafe { String::from_utf8_unchecked(wbuf.clone()) };
                     if !seen.contains(value.as_str()) {
                         let kind = if classify_string(&value) == StringKind::Obfuscated { StringKind::Obfuscated } else { StringKind::Wide };
-                        results.push(ExtractedString { value, offset: base_offset + ws, kind, section: sec.clone() });
+                        results.push(ExtractedString { value, offset: (base_offset + ws) as u32, kind, section: sec.clone() });
                     }
                 }
                 wbuf.clear();
@@ -979,8 +980,8 @@ fn extract_strings(data: &[u8], base_offset: usize, section: &str) -> Vec<Extrac
 }
 
 struct ByteStats {
-    alpha:  u32,
-    digits: u32,
+    alpha:  u16,
+    digits: u16,
     all_numeric_like: bool,
 }
 
@@ -988,7 +989,7 @@ struct ByteStats {
 fn byte_stats(s: &str) -> ByteStats {
     let len = s.len();
     let ptr = s.as_ptr();
-    let (mut alpha, mut digits) = (0u32, 0u32);
+    let (mut alpha, mut digits) = (0u16, 0u16);
     let mut all_numeric_like = true;
     for i in 0..len {
         let b = unsafe { *ptr.add(i) };
@@ -1027,7 +1028,7 @@ fn classify_string(s: &str) -> StringKind {
     if looks_like_xor_artifact(s) { return StringKind::Obfuscated; }
 
     let alpha = stats.alpha as usize;
-    if alpha * 100 / total < 10 { return StringKind::Obfuscated; }
+    if total > 0 && alpha * 100 / total < 10 { return StringKind::Obfuscated; }
 
     if total >= 20 {
         let ent = shannon_entropy_str(s);
@@ -1071,7 +1072,7 @@ fn is_camel_or_pascal_case(s: &str) -> bool {
     let ptr = s.as_ptr();
     let first = unsafe { *ptr };
     if !first.is_ascii_uppercase() { return false; }
-    let (mut uppers, mut has_lower) = (1u32, false);
+    let (mut uppers, mut has_lower) = (1u16, false);
     for i in 1..len {
         let b = unsafe { *ptr.add(i) };
         if b.is_ascii_uppercase() { uppers += 1; }
@@ -1118,7 +1119,7 @@ fn looks_like_base64(s: &str) -> bool {
     let len = s.len();
     if len < 16 || len % 4 != 0 { return false; }
     let ptr = s.as_ptr();
-    let (mut eq, mut has_upper, mut has_lower, mut has_digit) = (0u32, false, false, false);
+    let (mut eq, mut has_upper, mut has_lower, mut has_digit) = (0u8, false, false, false);
     for i in 0..len {
         let b = unsafe { *ptr.add(i) };
         if b.is_ascii_uppercase()      { has_upper = true; }
@@ -1148,7 +1149,7 @@ fn looks_like_hex_string(s: &str) -> bool {
 fn looks_like_url_encoded(s: &str) -> bool {
     let len = s.len();
     let ptr = s.as_ptr();
-    let mut pct = 0u32;
+    let mut pct = 0u16;
     for i in 0..len {
         if unsafe { *ptr.add(i) } == b'%' { pct += 1; }
     }
@@ -1161,7 +1162,7 @@ fn looks_like_xor_artifact(s: &str) -> bool {
     if len < 8 { return false; }
     let ptr = s.as_ptr();
     let first = unsafe { *ptr };
-    let mut first_count = 0u32;
+    let mut first_count = 0u16;
     for i in 0..len {
         if unsafe { *ptr.add(i) } == first { first_count += 1; }
     }
@@ -1169,7 +1170,7 @@ fn looks_like_xor_artifact(s: &str) -> bool {
     let p0 = unsafe { *ptr };
     let p1 = unsafe { *ptr.add(1) };
     let pairs = len / 2;
-    let mut pair_matches = 0u32;
+    let mut pair_matches = 0u16;
     for i in (0..pairs * 2).step_by(2) {
         if unsafe { *ptr.add(i) } == p0 && unsafe { *ptr.add(i + 1) } == p1 {
             pair_matches += 1;

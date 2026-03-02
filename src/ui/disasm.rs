@@ -59,7 +59,7 @@ pub fn render_disasm(
                 if let Some(m) = meta {
                     if let Some(uc_idx) = m.user_code {
                         if btn(ui, "[ User Code ]", Color32::from_rgb(100, 220, 160)) {
-                            *scroll_to = Some(uc_idx);
+                            *scroll_to = Some(uc_idx as usize);
                         }
                     }
                 }
@@ -79,6 +79,7 @@ pub fn render_disasm(
                             ui.set_max_height(300.0);
                             egui::ScrollArea::vertical().show(ui, |ui| {
                                 for (i, &fi) in m.func_starts.iter().enumerate() {
+                                    let fi = fi as usize;
                                     let addr_str = format_addr(&lines[fi], use_rva, image_base);
                                     let sym = if !lines[fi].comment.is_empty() {
                                         format!("  {}", &lines[fi].comment)
@@ -203,10 +204,10 @@ pub fn render_disasm(
     let s_show_arcs     = settings.show_arcs;
     let s_show_comments = settings.show_comments;
     let s_use_rva       = settings.use_rva;
-    let s_max_span      = settings.max_arc_span;
+    let s_max_span      = settings.max_arc_span as usize;
     let s_rel_addr      = settings.rel_addr;
     let image_base      = pe.image_base;
-    let user_code_idx   = meta.and_then(|m| m.user_code);
+    let user_code_idx   = meta.and_then(|m| m.user_code).map(|v| v as usize);
 
     let output = scroll_area.show_rows(ui, row_height, display_count, |ui, row_range| {
         ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
@@ -224,16 +225,18 @@ pub fn render_disasm(
         if let Some(m) = meta {
             if !search_active && s_show_arcs {
                 for arc in &m.arcs {
-                    let lo = arc.from.min(arc.to);
-                    let hi = arc.from.max(arc.to);
+                    let from = arc.from as usize;
+                    let to   = arc.to as usize;
+                    let lo = from.min(to);
+                    let hi = from.max(to);
                     if hi - lo > s_max_span { continue; }
                     let color = arc_color(arc.kind);
-                    if arc.from >= row_range.start && arc.from < row_range.end {
-                        let e = arc_endpoints.entry(arc.from).or_insert((false, false, color));
+                    if from >= row_range.start && from < row_range.end {
+                        let e = arc_endpoints.entry(from).or_insert((false, false, color));
                         e.0 = true;
                     }
-                    if arc.to >= row_range.start && arc.to < row_range.end {
-                        let e = arc_endpoints.entry(arc.to).or_insert((false, false, color));
+                    if to >= row_range.start && to < row_range.end {
+                        let e = arc_endpoints.entry(to).or_insert((false, false, color));
                         e.1 = true;
                     }
                 }
@@ -375,8 +378,10 @@ pub fn render_disasm(
 
                 for &arc_i in &arc_order {
                     let arc = &m.arcs[arc_i];
-                    let lo = arc.from.min(arc.to);
-                    let hi = arc.from.max(arc.to);
+                    let from = arc.from as usize;
+                    let to   = arc.to as usize;
+                    let lo = from.min(to);
+                    let hi = from.max(to);
                     if hi < vis_lo || lo > vis_hi { continue; }
                     if hi - lo > s_max_span { continue; }
 
@@ -387,10 +392,10 @@ pub fn render_disasm(
                     let first_vis_y = row_ys.first().map(|&(_, y)| y).unwrap_or(0.0);
                     let last_vis_y  = row_ys.last().map(|&(_, y)| y).unwrap_or(0.0);
 
-                    let from_y = idx_to_y.get(&arc.from).copied()
-                        .unwrap_or(if arc.from < vis_lo { first_vis_y - 8.0 } else { last_vis_y + 8.0 });
-                    let to_y = idx_to_y.get(&arc.to).copied()
-                        .unwrap_or(if arc.to < vis_lo { first_vis_y - 8.0 } else { last_vis_y + 8.0 });
+                    let from_y = idx_to_y.get(&from).copied()
+                        .unwrap_or(if from < vis_lo { first_vis_y - 8.0 } else { last_vis_y + 8.0 });
+                    let to_y = idx_to_y.get(&to).copied()
+                        .unwrap_or(if to < vis_lo { first_vis_y - 8.0 } else { last_vis_y + 8.0 });
 
                     let (top_y, bot_y) = if from_y < to_y { (from_y, to_y) } else { (to_y, from_y) };
 
@@ -405,23 +410,23 @@ pub fn render_disasm(
 
                     let arc_end = right_edge - 3.0;
 
-                    let from_hovered = if idx_to_y.contains_key(&arc.from) {
+                    let from_hovered = if idx_to_y.contains_key(&from) {
                         let tick_hit = Rect::from_min_max(
                             Pos2::new(col_x, from_y - 2.0),
                             Pos2::new(arc_end, from_y + 2.0),
                         );
                         let r = ui.interact(tick_hit, arc_id.with("from"), egui::Sense::click());
-                        if r.clicked() { *scroll_to = Some(arc.to); }
+                        if r.clicked() { *scroll_to = Some(to); }
                         r.hovered()
                     } else { false };
 
-                    let to_hovered = if idx_to_y.contains_key(&arc.to) {
+                    let to_hovered = if idx_to_y.contains_key(&to) {
                         let tick_hit = Rect::from_min_max(
                             Pos2::new(col_x, to_y - 2.0),
                             Pos2::new(arc_end, to_y + 2.0),
                         );
                         let r = ui.interact(tick_hit, arc_id.with("to"), egui::Sense::click());
-                        if r.clicked() { *scroll_to = Some(arc.from); }
+                        if r.clicked() { *scroll_to = Some(from); }
                         r.hovered()
                     } else { false };
 
@@ -429,7 +434,7 @@ pub fn render_disasm(
                     let draw_color = if any_hover { brighten(color, 80) } else { color };
                     let stroke = Stroke::new(if any_hover { 1.5 } else { 1.0 }, draw_color);
 
-                    if idx_to_y.contains_key(&arc.from) {
+                    if idx_to_y.contains_key(&from) {
                         if is_dashed {
                             draw_dashed_hline(&painter, from_y, col_x, arc_end, stroke, 3.0, 2.0);
                         } else {
@@ -444,7 +449,7 @@ pub fn render_disasm(
                         painter.line_segment([Pos2::new(col_x, top_y), Pos2::new(col_x, bot_y)], stroke);
                     }
 
-                    if idx_to_y.contains_key(&arc.to) {
+                    if idx_to_y.contains_key(&to) {
                         if is_dashed {
                             draw_dashed_hline(&painter, to_y, col_x, arc_end, stroke, 3.0, 2.0);
                         } else {
@@ -457,7 +462,7 @@ pub fn render_disasm(
                     }
 
                     if vert_resp.clicked() {
-                        *scroll_to = Some(arc.to);
+                        *scroll_to = Some(to);
                     }
 
                     if any_hover {
@@ -467,8 +472,8 @@ pub fn render_disasm(
                             InstrKind::CondJump => "Cond. jump",
                             _                   => "Branch",
                         };
-                        let src_addr = format_addr(&lines[arc.from], s_use_rva, image_base);
-                        let dst_addr = format_addr(&lines[arc.to], s_use_rva, image_base);
+                        let src_addr = format_addr(&lines[from], s_use_rva, image_base);
+                        let dst_addr = format_addr(&lines[to], s_use_rva, image_base);
                         let tip = format!("{kind_label}: {src_addr} -> {dst_addr}\nClick to follow");
                         vert_resp.on_hover_text(tip);
                     }

@@ -348,7 +348,7 @@ pub fn render_overview(ui: &mut Ui, pe: &PeInfo, score: u8) {
         section_card(ui, |ui| {
             grid(ui, "ov_file", |ui| {
                 kv(ui, "Path",    &pe.path);
-                kv(ui, "Size",    &format!("{} bytes  ({:.2} KB)", pe.file_size, pe.file_size as f64/1024.0));
+                kv(ui, "Size",    &format!("{} bytes  ({:.2} KB)", pe.file_size, pe.file_size as f64 / 1024.0));
                 kv(ui, "MD5",     &pe.md5);
                 kv(ui, "SHA-256", &pe.sha256);
                 if !pe.imphash.is_empty() { kv(ui, "ImpHash", &pe.imphash); }

@@ -3,7 +3,7 @@ use eframe::egui::Color32;
 #[derive(Default)]
 pub struct PeInfo {
     pub path:        String,
-    pub file_size:   usize,
+    pub file_size:   u32,
     pub arch:        String,
     pub entry_point: u32,
     pub image_base:  u64,
@@ -79,19 +79,19 @@ pub struct DisasmLine {
 }
 
 pub struct BranchArc {
-    pub from: usize,
-    pub to:   usize,
+    pub from: u16,
+    pub to:   u16,
     pub kind: InstrKind,
     pub col:  u8,
 }
 
 pub struct DisasmMeta {
-    pub calls:       u32,
-    pub jumps:       u32,
-    pub rets:        u32,
-    pub nops:        u32,
-    pub func_starts: Vec<usize>,
-    pub user_code:   Option<usize>,
+    pub calls:       u16,
+    pub jumps:       u16,
+    pub rets:        u16,
+    pub nops:        u16,
+    pub func_starts: Vec<u16>,
+    pub user_code:   Option<u16>,
     pub arcs:        Vec<BranchArc>,
 }
 
@@ -113,7 +113,7 @@ pub struct ImportInfo {
 
 pub struct OverlayInfo {
     pub offset: u32,
-    pub size:   usize,
+    pub size:   u32,
 }
 
 #[allow(dead_code)]
@@ -173,7 +173,7 @@ pub struct RustInfo {
 
 pub struct ExtractedString {
     pub value:   String,
-    pub offset:  usize,
+    pub offset:  u32,
     pub kind:    StringKind,
     pub section: String,
 }
@@ -206,7 +206,7 @@ pub struct DisasmSettings {
     pub show_comments: bool,
     pub use_rva:       bool,
     pub rel_addr:      bool,
-    pub max_arc_span:  usize,
+    pub max_arc_span:  u16,
 }
 
 impl Default for DisasmSettings {
@@ -217,7 +217,7 @@ impl Default for DisasmSettings {
             show_comments: true,
             use_rva:       true,
             rel_addr:      true,
-            max_arc_span:  200,
+            max_arc_span:  200u16,
         }
     }
 }
