@@ -111,6 +111,17 @@ pub fn parse_pe(path: &str) -> PeInfo {
         info.rust_info = extract_rust_info(&info.strings);
     }
 
+    let ep_file_offset = info.sections.iter()
+        .find(|s| s.is_ep)
+        .and_then(|s| info.entry_point.checked_sub(s.virtual_addr).map(|rva| (rva + s.raw_offset) as usize));
+    let total_imports: usize = info.imports.iter().map(|i| i.functions.len()).sum();
+    info.packer = detect_packer(
+        &info.sections, &buffer, ep_file_offset,
+        info.overlay.is_some(), total_imports,
+    );
+
+    info.embedded = scan_embedded_artifacts(&buffer, &info.sections);
+
     info.iat_map = build_iat_map(&pe, &buffer, is_64, info.image_base);
 
     let (dlines, dmeta) = compute_disasm_lines(&info, &buffer);

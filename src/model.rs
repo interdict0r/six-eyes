@@ -34,6 +34,8 @@ pub struct PeInfo {
     pub block_entropy:     Vec<f32>,
     pub resources:         Option<ResourceInfo>,
     pub certificate:       Option<CertificateInfo>,
+    pub packer:            Option<PackerInfo>,
+    pub embedded:          Vec<EmbeddedArtifact>,
     pub disasm_lines:      Vec<DisasmLine>,
     pub disasm_meta:       Option<DisasmMeta>,
     pub iat_map:           std::collections::HashMap<u64, String>,
@@ -157,6 +159,54 @@ pub struct CertificateInfo {
     pub revision:   u16,
     pub cert_type:  u16,
     pub type_label: String,
+}
+
+pub struct PackerInfo {
+    pub name:       &'static str,
+    pub confidence: PackerConfidence,
+    pub details:    String,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PackerConfidence { High, Medium, Low }
+
+impl PackerConfidence {
+    #[inline]
+    pub fn label(self) -> &'static str {
+        match self { Self::High => "HIGH", Self::Medium => "MED", Self::Low => "LOW" }
+    }
+    #[inline]
+    pub fn color(self) -> Color32 {
+        match self {
+            Self::High   => Color32::from_rgb(220, 60, 60),
+            Self::Medium => Color32::from_rgb(220, 170, 40),
+            Self::Low    => Color32::from_rgb(100, 170, 255),
+        }
+    }
+}
+
+pub struct EmbeddedArtifact {
+    pub kind:   ArtifactKind,
+    pub offset: u32,
+    pub size:   u32,
+    pub detail: String,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactKind { Pe, Shellcode }
+
+impl ArtifactKind {
+    #[inline]
+    pub fn label(self) -> &'static str {
+        match self { Self::Pe => "Embedded PE", Self::Shellcode => "Shellcode" }
+    }
+    #[inline]
+    pub fn color(self) -> Color32 {
+        match self {
+            Self::Pe        => Color32::from_rgb(220, 60, 60),
+            Self::Shellcode => Color32::from_rgb(220, 130, 40),
+        }
+    }
 }
 
 #[derive(Default)]

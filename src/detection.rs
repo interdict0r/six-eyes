@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use crate::model::{PeInfo, ExtractedString, GoInfo, RustInfo};
+use crate::model::{PeInfo, ExtractedString, GoInfo, RustInfo, PackerInfo, PackerConfidence, SectionInfo, EmbeddedArtifact, ArtifactKind};
 use crate::hashing::md5_hex;
 
 pub struct RichHeaderInfo {
@@ -275,4 +275,343 @@ pub fn extract_rust_info(strings: &[ExtractedString]) -> Option<RustInfo> {
     } else {
         None
     }
+}
+
+
+struct EpSignature {
+    name:   &'static str,
+    bytes:  &'static [u8],
+    mask:   &'static [u8],  // 0xFF = must match, 0x00 = wildcard
+    detail: &'static str,
+}
+
+static EP_SIGNATURES: &[EpSignature] = &[
+    // UPX — standard x86 stub: PUSHAD; MOV ESI, <addr>; LEA EDI, [ESI+<off>]
+    EpSignature {
+        name: "UPX",
+        bytes:  &[0x60, 0xBE, 0x00, 0x00, 0x00, 0x00, 0x8D, 0xBE, 0x00, 0x00, 0x00, 0x00],
+        mask:   &[0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00],
+        detail: "UPX entry stub (PUSHAD; MOV ESI; LEA EDI)",
+    },
+    // UPX — alternate x64 stub: PUSH RBX; PUSH RSI; PUSH RDI; LEA ...
+    EpSignature {
+        name: "UPX",
+        bytes: &[0x53, 0x56, 0x57, 0x48, 0x8D],
+        mask:  &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
+        detail: "UPX x64 entry stub",
+    },
+    // ASPack: PUSHAD; CALL $+5; POP EBP; SUB EBP, <off>
+    EpSignature {
+        name: "ASPack",
+        bytes: &[0x60, 0xE8, 0x00, 0x00, 0x00, 0x00, 0x5D, 0x81, 0xED],
+        mask:  &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
+        detail: "ASPack stub (PUSHAD; CALL $+5; POP EBP)",
+    },
+    // PECompact: MOV EAX, <addr>; PUSH EAX; PUSH DWORD FS:[...]
+    EpSignature {
+        name: "PECompact",
+        bytes: &[0xB8, 0x00, 0x00, 0x00, 0x00, 0x50, 0x64, 0xFF, 0x35],
+        mask:  &[0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF],
+        detail: "PECompact SEH setup",
+    },
+    // MPRESS: PUSHAD; CALL <rel>; POP EAX; ADD EAX, <off>
+    EpSignature {
+        name: "MPRESS",
+        bytes: &[0x60, 0xE8, 0x00, 0x00, 0x00, 0x00, 0x58, 0x05],
+        mask:  &[0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF],
+        detail: "MPRESS entry stub",
+    },
+    // Petite: MOV EAX, <addr>; PUSHFW; PUSHAD; PUSH EAX
+    EpSignature {
+        name: "Petite",
+        bytes: &[0xB8, 0x00, 0x00, 0x00, 0x00, 0x66, 0x9C, 0x60, 0x50],
+        mask:  &[0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF],
+        detail: "Petite packer stub",
+    },
+    // FSG: MOV ESI, <addr>; LODSW; XCHG EAX, EBX; LODSW
+    EpSignature {
+        name: "FSG",
+        bytes: &[0xBE, 0x00, 0x00, 0x00, 0x00, 0xAD, 0x93, 0xAD],
+        mask:  &[0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF],
+        detail: "FSG packer stub",
+    },
+    // MEW: MOV ESI, <addr>; MOV EDI, ESI; XOR EAX, EAX; MOV ECX, <n>
+    EpSignature {
+        name: "MEW",
+        bytes: &[0xBE, 0x00, 0x00, 0x00, 0x00, 0x8B, 0xFE, 0x33, 0xC0, 0xB9],
+        mask:  &[0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
+        detail: "MEW packer stub",
+    },
+    // Themida/WinLicense: MOV EAX, <addr>; PUSHAD; OR EAX, EAX; JZ <off>
+    EpSignature {
+        name: "Themida/WinLicense",
+        bytes: &[0xB8, 0x00, 0x00, 0x00, 0x00, 0x60, 0x0B, 0xC0, 0x74, 0x68],
+        mask:  &[0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
+        detail: "Themida VM entry stub",
+    },
+    // Obsidium: JMP +2; <junk>; CALL
+    EpSignature {
+        name: "Obsidium",
+        bytes: &[0xEB, 0x02, 0x00, 0x00, 0xE8],
+        mask:  &[0xFF, 0xFF, 0x00, 0x00, 0xFF],
+        detail: "Obsidium junk-jump entry",
+    },
+];
+
+struct SectionPattern {
+    name:   &'static str,
+    names:  &'static [&'static str],
+    detail: &'static str,
+}
+
+static SECTION_PATTERNS: &[SectionPattern] = &[
+    SectionPattern { name: "UPX",          names: &["UPX0", "UPX1", "UPX2"],       detail: "UPX section names" },
+    SectionPattern { name: "ASPack",       names: &[".aspack", ".adata"],            detail: "ASPack section names" },
+    SectionPattern { name: "PECompact",    names: &["pec1", "pec2", "PEC2"],         detail: "PECompact section names" },
+    SectionPattern { name: "Petite",       names: &[".petite"],                      detail: "Petite section name" },
+    SectionPattern { name: "MPRESS",       names: &[".MPRESS1", ".MPRESS2"],         detail: "MPRESS section names" },
+    SectionPattern { name: "Themida/WinLicense", names: &[".themida", ".winlice"],   detail: "Themida section names" },
+    SectionPattern { name: "VMProtect",    names: &[".vmp0", ".vmp1", ".vmp2"],      detail: "VMProtect section names" },
+    SectionPattern { name: "Enigma",       names: &[".enigma1", ".enigma2"],         detail: "Enigma Protector section names" },
+    SectionPattern { name: "Obsidium",     names: &[".obsidiu"],                     detail: "Obsidium section name" },
+    SectionPattern { name: "NSPack",       names: &[".nsp0", ".nsp1", ".nsp2"],      detail: "NSPack section names" },
+    SectionPattern { name: "RLPack",       names: &[".RLPack"],                        detail: "RLPack section name" },
+];
+
+fn match_ep_signature(ep_bytes: &[u8]) -> Option<(&'static str, &'static str)> {
+    for sig in EP_SIGNATURES {
+        let len = sig.bytes.len();
+        if ep_bytes.len() < len { continue; }
+        let matched = (0..len).all(|i| sig.mask[i] == 0x00 || ep_bytes[i] == sig.bytes[i]);
+        if matched {
+            return Some((sig.name, sig.detail));
+        }
+    }
+    None
+}
+
+fn match_section_names(sections: &[SectionInfo]) -> Option<(&'static str, &'static str)> {
+    let sec_names: Vec<&str> = sections.iter().map(|s| s.name.as_str()).collect();
+    for pat in SECTION_PATTERNS {
+        if pat.names.iter().any(|n| sec_names.iter().any(|s| s.eq_ignore_ascii_case(n))) {
+            return Some((pat.name, pat.detail));
+        }
+    }
+    None
+}
+
+
+pub fn detect_packer(
+    sections: &[SectionInfo],
+    buffer: &[u8],
+    ep_file_offset: Option<usize>,
+    has_overlay: bool,
+    total_imports: usize,
+) -> Option<PackerInfo> {
+    let ep_bytes = ep_file_offset
+        .filter(|&off| off + 16 <= buffer.len())
+        .map(|off| &buffer[off..off + 16]);
+
+  
+    let ep_match   = ep_bytes.and_then(match_ep_signature);
+    let sec_match  = match_section_names(sections);
+
+    if let (Some((ep_name, ep_detail)), Some((sec_name, sec_detail))) = (ep_match, sec_match) {
+        if ep_name == sec_name {
+            return Some(PackerInfo {
+                name: ep_name,
+                confidence: PackerConfidence::High,
+                details: format!("{ep_detail}; {sec_detail}"),
+            });
+        }
+
+        return Some(PackerInfo {
+            name: sec_name,
+            confidence: PackerConfidence::High,
+            details: format!("{sec_detail} (EP also matches {ep_name})"),
+        });
+    }
+
+    if let Some((name, detail)) = sec_match {
+        return Some(PackerInfo {
+            name,
+            confidence: PackerConfidence::High,
+            details: detail.to_string(),
+        });
+    }
+
+    if let Some((name, detail)) = ep_match {
+        return Some(PackerInfo {
+            name,
+            confidence: PackerConfidence::Medium,
+            details: detail.to_string(),
+        });
+    }
+
+    let ep_section = sections.iter().find(|s| s.is_ep);
+
+    // High-entropy EP section + very few imports + overlay → likely packed (unknown packer)
+    if let Some(ep_sec) = ep_section {
+        if ep_sec.entropy > 7.0 && total_imports < 5 && has_overlay {
+            return Some(PackerInfo {
+                name: "Unknown Packer",
+                confidence: PackerConfidence::Low,
+                details: format!(
+                    "EP section '{}' entropy {:.2}, {} imports, overlay present",
+                    ep_sec.name, ep_sec.entropy, total_imports,
+                ),
+            });
+        }
+        // RWX EP section with high entropy
+        if ep_sec.entropy > 7.0
+            && ep_sec.characteristics.contains(&"WRITE")
+            && ep_sec.characteristics.contains(&"EXECUTE")
+        {
+            return Some(PackerInfo {
+                name: "Unknown Packer",
+                confidence: PackerConfidence::Low,
+                details: format!(
+                    "EP section '{}' is RWX with entropy {:.2}",
+                    ep_sec.name, ep_sec.entropy,
+                ),
+            });
+        }
+    }
+
+    None
+}
+
+
+pub fn scan_embedded_artifacts(buffer: &[u8], sections: &[SectionInfo]) -> Vec<EmbeddedArtifact> {
+    let mut results = Vec::new();
+    let len = buffer.len();
+    if len < 64 { return results; }
+
+    let base = buffer.as_ptr();
+
+    let mut pos = 4usize;
+    while pos + 64 <= len && results.len() < 32 {
+        // Quick check for 'MZ' (0x5A4D LE)
+        let mz = unsafe { std::ptr::read_unaligned(base.add(pos) as *const u16) };
+        if mz == 0x5A4D {
+            // Validate: e_lfanew must point to a PE\0\0 signature within bounds
+            if pos + 0x3C + 4 <= len {
+                let e_lfanew = unsafe {
+                    u32::from_le(std::ptr::read_unaligned(base.add(pos + 0x3C) as *const u32))
+                } as usize;
+                let pe_sig_off = pos + e_lfanew;
+                if e_lfanew >= 0x40 && e_lfanew < 0x1000 && pe_sig_off + 4 <= len {
+                    let pe_sig = unsafe {
+                        u32::from_le(std::ptr::read_unaligned(base.add(pe_sig_off) as *const u32))
+                    };
+                    if pe_sig == 0x0000_4550 { // "PE\0\0"
+                        let section_name = find_section_for_offset(sections, pos as u32);
+                        let est_size = estimate_pe_size(buffer, pos);
+                        results.push(EmbeddedArtifact {
+                            kind: ArtifactKind::Pe,
+                            offset: pos as u32,
+                            size: est_size,
+                            detail: format!(
+                                "MZ+PE at 0x{pos:X} (~{:.1} KB) in {section_name}",
+                                est_size as f64 / 1024.0,
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+        pos += 4;
+    }
+
+    for sec in sections {
+        if !sec.characteristics.contains(&"EXECUTE") { continue; }
+        let sec_start = sec.raw_offset as usize;
+        let sec_end = (sec_start + sec.raw_size as usize).min(len);
+        if sec_start >= sec_end || sec_end - sec_start < 16 { continue; }
+
+        // Skip .text — GetPC / NOP patterns are common in compiler-generated code.
+        let is_main_code = matches!(sec.name.trim(), ".text" | "CODE" | ".code");
+
+        let mut i = sec_start;
+        while i + 16 <= sec_end && results.len() < 32 {
+            let b = unsafe { *base.add(i) };
+
+            if b == 0x90 {
+                let start = i;
+                while i < sec_end && unsafe { *base.add(i) } == 0x90 { i += 1; }
+                let run = i - start;
+                if run >= 32 {
+                    results.push(EmbeddedArtifact {
+                        kind: ArtifactKind::Shellcode,
+                        offset: start as u32,
+                        size: run as u32,
+                        detail: format!("{run}-byte NOP sled in {}", sec.name),
+                    });
+                }
+                continue;
+            }
+
+            // fnstenv GetPC: D9 74 24 F4
+            if i + 4 <= sec_end && b == 0xD9 {
+                let b1 = unsafe { *base.add(i + 1) };
+                let b2 = unsafe { *base.add(i + 2) };
+                let b3 = unsafe { *base.add(i + 3) };
+                if b1 == 0x74 && b2 == 0x24 && b3 == 0xF4 {
+                    results.push(EmbeddedArtifact {
+                        kind: ArtifactKind::Shellcode,
+                        offset: i as u32,
+                        size: 4,
+                        detail: format!("fnstenv GetPC stub at 0x{i:X} in {}", sec.name),
+                    });
+                    i += 4;
+                    continue;
+                }
+            }
+
+            if !is_main_code && i + 6 <= sec_end && b == 0xE8 {
+                let call_rel = unsafe {
+                    std::ptr::read_unaligned(base.add(i + 1) as *const u32)
+                };
+                if call_rel == 0 {
+                    let pop = unsafe { *base.add(i + 5) };
+                    if (0x58..=0x5F).contains(&pop) {
+                        results.push(EmbeddedArtifact {
+                            kind: ArtifactKind::Shellcode,
+                            offset: i as u32,
+                            size: 6,
+                            detail: format!("CALL $+5; POP GetPC at 0x{i:X} in {}", sec.name),
+                        });
+                        i += 6;
+                        continue;
+                    }
+                }
+            }
+
+            i += 1;
+        }
+    }
+
+    results
+}
+
+fn estimate_pe_size(buffer: &[u8], mz_offset: usize) -> u32 {
+    if mz_offset + 0x3C + 4 > buffer.len() { return 0; }
+    let base = buffer.as_ptr();
+    let e_lfanew = unsafe {
+        u32::from_le(std::ptr::read_unaligned(base.add(mz_offset + 0x3C) as *const u32))
+    } as usize;
+    // SizeOfImage at PE+0x50 in optional header
+    let soi_off = mz_offset + e_lfanew + 0x50;
+    if soi_off + 4 > buffer.len() { return 0; }
+    let size_of_image = unsafe {
+        u32::from_le(std::ptr::read_unaligned(base.add(soi_off) as *const u32))
+    };
+    size_of_image.min((buffer.len() - mz_offset) as u32)
+}
+
+fn find_section_for_offset(sections: &[SectionInfo], file_offset: u32) -> &str {
+    sections.iter()
+        .find(|s| file_offset >= s.raw_offset && file_offset < s.raw_offset + s.raw_size)
+        .map(|s| s.name.as_str())
+        .unwrap_or("overlay")
 }

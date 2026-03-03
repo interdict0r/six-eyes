@@ -34,6 +34,11 @@ pub fn render_overview(ui: &mut Ui, pe: &PeInfo, score: u8) {
                             ui.label(RichText::new("·").weak().size(14.0));
                             ui.label(RichText::new(lang).color(Color32::from_rgb(180,140,255)).strong().size(14.0));
                         }
+                        if let Some(ref pk) = pe.packer {
+                            ui.label(RichText::new("·").weak().size(14.0));
+                            let c = pk.confidence.color();
+                            ui.label(RichText::new(format!("Packed: {}", pk.name)).color(c).strong().size(14.0));
+                        }
                     });
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(format!("{} sections", pe.sections.len())).weak().size(12.0));
@@ -95,6 +100,16 @@ pub fn render_overview(ui: &mut Ui, pe: &PeInfo, score: u8) {
                 if !pe.imphash.is_empty() { kv(ui, "ImpHash", &pe.imphash); }
                 if let Some(lang) = &pe.detected_language {
                     kv(ui, "Language", lang);
+                }
+                if let Some(ref pk) = pe.packer {
+                    ui.label(RichText::new("Packer").strong().size(14.0));
+                    ui.horizontal(|ui| {
+                        let c = pk.confidence.color();
+                        ui.label(RichText::new(pk.name).color(c).strong().size(13.0));
+                        badge(ui, pk.confidence.label(), c);
+                        ui.label(RichText::new(&pk.details).weak().size(12.0));
+                    });
+                    ui.end_row();
                 }
                 if let Some(ref cert) = pe.certificate {
                     kv(ui, "Certificate", &format!("{} ({} bytes at 0x{:X})", cert.type_label, cert.size, cert.offset));
@@ -343,6 +358,23 @@ pub fn render_overview(ui: &mut Ui, pe: &PeInfo, score: u8) {
             });
         });
         ui.add_space(16.0);
+
+        if !pe.embedded.is_empty() {
+            section_header(ui, "Embedded Artifacts");
+            section_card(ui, |ui| {
+                for (i, art) in pe.embedded.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        let c = art.kind.color();
+                        badge(ui, art.kind.label(), c);
+                        ui.label(RichText::new(format!("0x{:08X}", art.offset)).monospace().size(12.0));
+                        ui.label(RichText::new(format!("{} bytes", art.size)).weak().size(12.0));
+                        ui.label(RichText::new(&art.detail).size(12.0));
+                    });
+                    if i < pe.embedded.len() - 1 { ui.add_space(2.0); }
+                }
+            });
+            ui.add_space(16.0);
+        }
 
         section_header(ui, "File");
         section_card(ui, |ui| {

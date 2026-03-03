@@ -225,6 +225,27 @@ pub fn build_heuristic_flags(pe: &PeInfo) -> Vec<HeuristicFlag> {
         f!(Severity::Warn, "Packing/Obfuscation", format!("{obf_count} possibly encoded strings"));
     }
 
+    let embedded_pe = pe.embedded.iter().filter(|a| a.kind == ArtifactKind::Pe).count();
+    let embedded_sc = pe.embedded.iter().filter(|a| a.kind == ArtifactKind::Shellcode).count();
+    if embedded_pe > 0 {
+        f!(Severity::Critical, "Packing/Obfuscation",
+           format!("{embedded_pe} embedded PE(s) detected — possible dropper or resource-based payload"));
+    }
+    if embedded_sc > 0 {
+        f!(Severity::Critical, "Packing/Obfuscation",
+           format!("{embedded_sc} shellcode pattern(s) detected — position-independent code stubs"));
+    }
+
+    if let Some(ref pk) = pe.packer {
+        let sev = match pk.confidence {
+            PackerConfidence::High   => Severity::Critical,
+            PackerConfidence::Medium => Severity::Warn,
+            PackerConfidence::Low    => Severity::Warn,
+        };
+        f!(sev, "Packing/Obfuscation",
+           format!("Identified packer: {} [{}] — {}", pk.name, pk.confidence.label(), pk.details));
+    }
+
     if let Some(ov) = &pe.overlay {
         let pct = ov.size * 100 / pe.file_size.max(1);
         if pct > 20 {
