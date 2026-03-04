@@ -123,7 +123,7 @@ pub fn render_disasm(
                         .hint_text("address (hex)")
                 );
                 if goto_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    if let Some(idx) = resolve_goto(lines, goto_buf.trim()) {
+                    if let Some(idx) = resolve_goto(lines, goto_buf.trim(), meta) {
                         *scroll_to = Some(idx);
                     }
                 }
@@ -135,14 +135,6 @@ pub fn render_disasm(
                         .font(egui::TextStyle::Monospace)
                         .hint_text("mnemonic / symbol")
                 );
-
-                if !search_buf.is_empty() {
-                    let needle = search_buf.to_ascii_lowercase();
-                    let matches: usize = lines.iter()
-                        .filter(|l| l.mnemonic.to_ascii_lowercase().contains(&needle) || l.comment.to_ascii_lowercase().contains(&needle))
-                        .count();
-                    ui.label(RichText::new(format!("{matches} hits")).weak().size(11.0));
-                }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if let Some(m) = meta {
@@ -164,12 +156,18 @@ pub fn render_disasm(
 
     let filtered: Vec<usize> = if search_active {
         lines.iter().enumerate()
-            .filter(|(_, l)| l.mnemonic.to_ascii_lowercase().contains(&needle) || l.comment.to_ascii_lowercase().contains(&needle))
+            .filter(|(_, l)| l.opcode.to_ascii_lowercase().contains(&needle) || l.operands.to_ascii_lowercase().contains(&needle) || l.comment.to_ascii_lowercase().contains(&needle))
             .map(|(i, _)| i)
             .collect()
     } else {
         Vec::new()
     };
+
+    if search_active {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(format!("{} hits", filtered.len())).weak().size(11.0));
+        });
+    }
 
     let display_count = if search_active { filtered.len() } else { lines.len() };
 
@@ -324,7 +322,7 @@ pub fn render_disasm(
                 ui.add_space(2.0);
 
                 if !line.operands.is_empty() {
-                    render_operands(ui, &line.operands, line, first_ip, last_ip, lines, scroll_to, s_rel_addr);
+                    render_operands(ui, &line.operands, line, first_ip, last_ip, lines, scroll_to, s_rel_addr, meta);
                 }
 
                 if s_show_comments && !line.comment.is_empty() {
@@ -496,6 +494,7 @@ fn render_operands(
     all_lines: &[DisasmLine],
     scroll_to: &mut Option<usize>,
     rel_addr: bool,
+    meta: Option<&DisasmMeta>,
 ) {
     let tokens = tokenize_operands(operands);
 
@@ -524,7 +523,7 @@ fn render_operands(
 
         if let OpToken::Number(_) = tok {
             if let Some(target) = clickable_target {
-                let tgt_idx = all_lines.iter().position(|l| l.ip == target);
+                let tgt_idx = meta.and_then(|m| m.ip_to_idx.get(&target).copied());
                 let display_text = if rel_addr {
                     let offset = target as i64 - line.ip as i64;
                     if offset >= 0 {
@@ -727,11 +726,13 @@ fn draw_dashed_vline(painter: &egui::Painter, x: f32, y0: f32, y1: f32, stroke: 
     }
 }
 
-fn resolve_goto(lines: &[DisasmLine], input: &str) -> Option<usize> {
+fn resolve_goto(lines: &[DisasmLine], input: &str, meta: Option<&DisasmMeta>) -> Option<usize> {
     let clean = input.trim_start_matches("0x").trim_start_matches("0X");
     let addr = u64::from_str_radix(clean, 16).ok()?;
-    if let Some(idx) = lines.iter().position(|l| l.ip == addr) {
-        return Some(idx);
+    if let Some(m) = meta {
+        if let Some(&idx) = m.ip_to_idx.get(&addr) {
+            return Some(idx);
+        }
     }
     if let Some(idx) = lines.iter().position(|l| l.rva as u64 == addr) {
         return Some(idx);

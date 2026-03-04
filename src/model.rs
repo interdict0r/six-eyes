@@ -74,7 +74,6 @@ pub struct DisasmLine {
     pub hex_bytes:   String,
     pub opcode:      String,
     pub operands:    String,
-    pub mnemonic:    String,
     pub kind:        InstrKind,
     pub target:      Option<u64>,
     pub is_prologue: bool,
@@ -96,6 +95,7 @@ pub struct DisasmMeta {
     pub func_starts: Vec<u16>,
     pub user_code:   Option<u16>,
     pub arcs:        Vec<BranchArc>,
+    pub ip_to_idx:   std::collections::HashMap<u64, usize>,
 }
 
 pub struct SectionInfo {

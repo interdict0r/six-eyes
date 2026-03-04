@@ -259,7 +259,7 @@ fn compute_block_entropy(buffer: &[u8], block_size: usize) -> Vec<f32> {
 }
 
 fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8]) -> (Vec<DisasmLine>, DisasmMeta) {
-    let empty = || (Vec::new(), DisasmMeta { calls: 0u16, jumps: 0u16, rets: 0u16, nops: 0u16, func_starts: Vec::new(), user_code: None, arcs: Vec::new() });
+    let empty = || (Vec::new(), DisasmMeta { calls: 0u16, jumps: 0u16, rets: 0u16, nops: 0u16, func_starts: Vec::new(), user_code: None, arcs: Vec::new(), ip_to_idx: std::collections::HashMap::new() });
     if buffer.is_empty() { return empty(); }
 
     let ep_off = match find_ep_file_offset(pe) {
@@ -283,7 +283,7 @@ fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8]) -> (Vec<DisasmLine>, DisasmM
     let lut = HEX_LUT.as_ptr();
     let mut lines = Vec::with_capacity(instructions.len());
 
-    let mut meta = DisasmMeta { calls: 0u16, jumps: 0u16, rets: 0u16, nops: 0u16, func_starts: Vec::new(), user_code: None, arcs: Vec::new() };
+    let mut meta = DisasmMeta { calls: 0u16, jumps: 0u16, rets: 0u16, nops: 0u16, func_starts: Vec::new(), user_code: None, arcs: Vec::new(), ip_to_idx: std::collections::HashMap::new() };
 
     let first_ip = instructions[0].ip();
     let last_ip  = instructions.last().map(|i| i.ip()).unwrap_or(first_ip);
@@ -357,14 +357,13 @@ fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8]) -> (Vec<DisasmLine>, DisasmM
         lines.push(DisasmLine {
             ip: instr_ip, rva, hex_bytes,
             opcode: opcode.to_string(), operands: operands.to_string(),
-            mnemonic: output.clone(),
             kind, target, is_prologue, comment,
         });
     }
 
-    let mut ip_to_idx: std::collections::HashMap<u64, usize> = std::collections::HashMap::with_capacity(lines.len());
+    meta.ip_to_idx = std::collections::HashMap::with_capacity(lines.len());
     for (i, l) in lines.iter().enumerate() {
-        ip_to_idx.insert(l.ip, i);
+        meta.ip_to_idx.insert(l.ip, i);
     }
 
     if meta.user_code.is_none() {
@@ -372,7 +371,7 @@ fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8]) -> (Vec<DisasmLine>, DisasmM
             if line.kind == InstrKind::Call {
                 if let Some(tgt) = line.target {
                     if tgt >= first_ip && tgt <= last_ip {
-                        if let Some(&tgt_idx) = ip_to_idx.get(&tgt) {
+                        if let Some(&tgt_idx) = meta.ip_to_idx.get(&tgt) {
                             if lines[tgt_idx].is_prologue {
                                 if tgt_idx != 0 && idx > 0 {
                                     meta.user_code = Some(tgt_idx as u16);
@@ -390,7 +389,7 @@ fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8]) -> (Vec<DisasmLine>, DisasmM
     for (i, line) in lines.iter().enumerate() {
         if matches!(line.kind, InstrKind::Call | InstrKind::Jump | InstrKind::CondJump) {
             if let Some(tgt) = line.target {
-                if let Some(&tgt_idx) = ip_to_idx.get(&tgt) {
+                if let Some(&tgt_idx) = meta.ip_to_idx.get(&tgt) {
                     arcs.push(BranchArc { from: i as u16, to: tgt_idx as u16, kind: line.kind, col: 0 });
                 }
             }
@@ -430,24 +429,26 @@ fn split_opcode_operands(text: &str) -> (&str, &str) {
 }
 
 fn build_string_va_map(pe: &PeInfo) -> std::collections::HashMap<u64, String> {
+    let mut sorted_secs: Vec<(u32, u32, u32)> = pe.sections.iter()
+        .map(|s| (s.raw_offset, s.raw_size, s.virtual_addr))
+        .collect();
+    sorted_secs.sort_unstable_by_key(|e| e.0);
+
     let mut map = std::collections::HashMap::new();
     for es in &pe.strings {
         let off = es.offset;
-        for s in &pe.sections {
-            let sec_raw_start = s.raw_offset;
-            let sec_raw_end   = sec_raw_start + s.raw_size;
-            if off >= sec_raw_start && off < sec_raw_end {
-                let rva = s.virtual_addr as u64 + (off - sec_raw_start) as u64;
-                let va  = pe.image_base + rva;
-                let preview = if es.value.len() > 40 {
-                    format!("\"{}...\"", &es.value[..40])
-                } else {
-                    format!("\"{}\"", es.value)
-                };
-                map.insert(va, preview);
-                break;
-            }
-        }
+        let idx = sorted_secs.partition_point(|e| e.0 <= off);
+        if idx == 0 { continue; }
+        let (sec_raw_start, sec_raw_size, sec_va) = sorted_secs[idx - 1];
+        if off >= sec_raw_start + sec_raw_size { continue; }
+        let rva = sec_va as u64 + (off - sec_raw_start) as u64;
+        let va  = pe.image_base + rva;
+        let preview = if es.value.len() > 40 {
+            format!("\"{}...\"", &es.value[..40])
+        } else {
+            format!("\"{}\"", es.value)
+        };
+        map.insert(va, preview);
     }
     map
 }
@@ -829,7 +830,9 @@ fn build_iat_map(pe: &VecPE, buffer: &[u8], is_64: bool, image_base: u64) -> std
     };
     if import_rva == 0 || import_size == 0 { return map; }
 
-    let raw_import_offset = match rva_to_offset(pe, import_rva) {
+    let slookup = SectionLookup::from_pe(pe);
+
+    let raw_import_offset = match slookup.resolve(import_rva) {
         Some(o) => o,
         None    => return map,
     };
@@ -847,7 +850,7 @@ fn build_iat_map(pe: &VecPE, buffer: &[u8], is_64: bool, image_base: u64) -> std
         if name_rva == 0 && thunk_rva == 0 && first_thunk == 0 { break; }
 
         let dll_name = if name_rva != 0 {
-            rva_to_offset(pe, name_rva)
+            slookup.resolve(name_rva)
                 .map(|off| read_cstring(buffer, off))
                 .unwrap_or_default()
         } else {
@@ -858,7 +861,7 @@ fn build_iat_map(pe: &VecPE, buffer: &[u8], is_64: bool, image_base: u64) -> std
         let iat_rva_start = first_thunk;
 
         if name_thunk_start != 0 && iat_rva_start != 0 {
-            if let Some(mut name_off) = rva_to_offset(pe, name_thunk_start) {
+            if let Some(mut name_off) = slookup.resolve(name_thunk_start) {
                 let mut idx = 0u32;
                 loop {
                     if name_off + thunk_size > buffer.len() { break; }
@@ -872,7 +875,7 @@ fn build_iat_map(pe: &VecPE, buffer: &[u8], is_64: bool, image_base: u64) -> std
                         format!("Ordinal#{}", val & 0xFFFF)
                     } else {
                         let hint_rva = (val & 0x7FFF_FFFF) as u32;
-                        rva_to_offset(pe, hint_rva)
+                        slookup.resolve(hint_rva)
                             .map(|hoff| read_cstring(buffer, hoff + 2))
                             .unwrap_or_default()
                     };
@@ -894,6 +897,37 @@ fn build_iat_map(pe: &VecPE, buffer: &[u8], is_64: bool, image_base: u64) -> std
     }
 
     map
+}
+
+struct SectionLookup {
+    entries: Vec<(u32, u32, u32)>,
+}
+
+impl SectionLookup {
+    fn from_pe(pe: &VecPE) -> Self {
+        let mut entries = Vec::new();
+        if let Ok(sections) = pe.get_section_table() {
+            for s in sections {
+                let va    = s.virtual_address.0;
+                let vsize = s.virtual_size.max(s.size_of_raw_data);
+                let raw   = s.pointer_to_raw_data.0;
+                entries.push((va, vsize, raw));
+            }
+            entries.sort_unstable_by_key(|e| e.0);
+        }
+        Self { entries }
+    }
+
+    fn resolve(&self, rva: u32) -> Option<usize> {
+        let idx = self.entries.partition_point(|e| e.0 <= rva);
+        if idx == 0 { return None; }
+        let (va, vsize, raw) = self.entries[idx - 1];
+        if rva < va + vsize {
+            Some((raw + (rva - va)) as usize)
+        } else {
+            None
+        }
+    }
 }
 
 fn rva_to_offset(pe: &VecPE, rva: u32) -> Option<usize> {
@@ -961,7 +995,7 @@ fn extract_strings(data: &[u8], base_offset: usize, section: &str) -> Vec<Extrac
     }
 
     {
-        let seen: HashSet<String> = results.iter().map(|r| r.value.clone()).collect();
+        let mut seen: HashSet<String> = results.iter().map(|r| r.value.clone()).collect();
         let mut wstart: Option<usize> = None;
         let mut wbuf: Vec<u8> = Vec::with_capacity(256);
         let mut i = 0usize;
@@ -977,7 +1011,7 @@ fn extract_strings(data: &[u8], base_offset: usize, section: &str) -> Vec<Extrac
             } else if let Some(ws) = wstart.take() {
                 if wbuf.len() >= MIN_LEN {
                     let value = unsafe { String::from_utf8_unchecked(std::mem::take(&mut wbuf)) };
-                    if !seen.contains(value.as_str()) {
+                    if seen.insert(value.clone()) {
                         let kind = if classify_string(&value) == StringKind::Obfuscated { StringKind::Obfuscated } else { StringKind::Wide };
                         results.push(ExtractedString { value, offset: (base_offset + ws) as u32, kind, section: sec.clone() });
                     }
@@ -1031,8 +1065,10 @@ fn classify_string(s: &str) -> StringKind {
     if total < 8 { return StringKind::Ascii; }
     if total >= 32 && looks_like_hex_string(s) { return StringKind::Obfuscated; }
 
+    let needs_entropy = (total >= 16 && looks_like_base64(s)) || total >= 20;
+    let ent = if needs_entropy { shannon_entropy_str(s) } else { 0.0 };
+
     if total >= 16 && looks_like_base64(s) {
-        let ent = shannon_entropy_str(s);
         if ent > 4.0 && stats.digits > 0 { return StringKind::Obfuscated; }
     }
 
@@ -1043,7 +1079,6 @@ fn classify_string(s: &str) -> StringKind {
     if total > 0 && alpha * 100 / total < 10 { return StringKind::Obfuscated; }
 
     if total >= 20 {
-        let ent = shannon_entropy_str(s);
         if ent > 4.8 && alpha * 100 / total < 35 { return StringKind::Obfuscated; }
     }
 
