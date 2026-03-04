@@ -293,12 +293,12 @@ static EP_SIGNATURES: &[EpSignature] = &[
         mask:   &[0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00],
         detail: "UPX entry stub (PUSHAD; MOV ESI; LEA EDI)",
     },
-    // UPX — alternate x64 stub: PUSH RBX; PUSH RSI; PUSH RDI; LEA ...
+    // UPX — x64 stub: PUSH RBX; PUSH RSI; PUSH RDI; LEA RSI, [RIP+<off>]; LEA RDI, [RSI+<off>]
     EpSignature {
         name: "UPX",
-        bytes: &[0x53, 0x56, 0x57, 0x48, 0x8D],
-        mask:  &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
-        detail: "UPX x64 entry stub",
+        bytes: &[0x53, 0x56, 0x57, 0x48, 0x8D, 0x35, 0x00, 0x00, 0x00, 0x00, 0x48, 0x8D, 0x3E],
+        mask:  &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF],
+        detail: "UPX x64 entry stub (PUSH RBX/RSI/RDI; LEA RSI,[RIP]; LEA RDI,[RSI])",
     },
     // ASPack: PUSHAD; CALL $+5; POP EBP; SUB EBP, <off>
     EpSignature {
@@ -412,7 +412,6 @@ pub fn detect_packer(
         .filter(|&off| off + 16 <= buffer.len())
         .map(|off| &buffer[off..off + 16]);
 
-  
     let ep_match   = ep_bytes.and_then(match_ep_signature);
     let sec_match  = match_section_names(sections);
 
@@ -574,7 +573,8 @@ pub fn scan_embedded_artifacts(buffer: &[u8], sections: &[SectionInfo]) -> Vec<E
                 };
                 if call_rel == 0 {
                     let pop = unsafe { *base.add(i + 5) };
-                    if (0x58..=0x5F).contains(&pop) {
+                    let prev = if i > sec_start { unsafe { *base.add(i - 1) } } else { 0 };
+                    if (0x58..=0x5F).contains(&pop) && prev != 0x60 {
                         results.push(EmbeddedArtifact {
                             kind: ArtifactKind::Shellcode,
                             offset: i as u32,
@@ -595,23 +595,41 @@ pub fn scan_embedded_artifacts(buffer: &[u8], sections: &[SectionInfo]) -> Vec<E
 }
 
 fn estimate_pe_size(buffer: &[u8], mz_offset: usize) -> u32 {
+    let remaining = (buffer.len() - mz_offset) as u32;
     if mz_offset + 0x3C + 4 > buffer.len() { return 0; }
     let base = buffer.as_ptr();
     let e_lfanew = unsafe {
         u32::from_le(std::ptr::read_unaligned(base.add(mz_offset + 0x3C) as *const u32))
     } as usize;
-    // SizeOfImage at PE+0x50 in optional header
-    let soi_off = mz_offset + e_lfanew + 0x50;
-    if soi_off + 4 > buffer.len() { return 0; }
-    let size_of_image = unsafe {
-        u32::from_le(std::ptr::read_unaligned(base.add(soi_off) as *const u32))
-    };
-    size_of_image.min((buffer.len() - mz_offset) as u32)
+    let pe_off = mz_offset + e_lfanew;
+    if pe_off + 0x18 > buffer.len() { return 0; }
+    let num_sections = unsafe {
+        u16::from_le(std::ptr::read_unaligned(base.add(pe_off + 6) as *const u16))
+    } as usize;
+    let opt_hdr_size = unsafe {
+        u16::from_le(std::ptr::read_unaligned(base.add(pe_off + 0x14) as *const u16))
+    } as usize;
+    let first_sec = pe_off + 0x18 + opt_hdr_size;
+    let mut max_end: u32 = 0;
+    for i in 0..num_sections.min(96) {
+        let sh = first_sec + i * 40;
+        if sh + 40 > buffer.len() { break; }
+        let raw_offset = unsafe {
+            u32::from_le(std::ptr::read_unaligned(base.add(sh + 20) as *const u32))
+        };
+        let raw_size = unsafe {
+            u32::from_le(std::ptr::read_unaligned(base.add(sh + 16) as *const u32))
+        };
+        let end = raw_offset.saturating_add(raw_size);
+        if end > max_end { max_end = end; }
+    }
+    if max_end == 0 { remaining } else { max_end.min(remaining) }
 }
 
 fn find_section_for_offset(sections: &[SectionInfo], file_offset: u32) -> &str {
     sections.iter()
-        .find(|s| file_offset >= s.raw_offset && file_offset < s.raw_offset + s.raw_size)
+        .find(|s| file_offset >= s.raw_offset
+            && s.raw_offset.checked_add(s.raw_size).is_some_and(|end| file_offset < end))
         .map(|s| s.name.as_str())
         .unwrap_or("overlay")
 }
