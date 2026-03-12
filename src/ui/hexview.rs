@@ -12,7 +12,7 @@ pub fn render_hexview(ui: &mut Ui, pe: &PeInfo) {
         return;
     }
 
-    let total_rows = (pe.buffer.len() + BYTES_PER_ROW - 1) / BYTES_PER_ROW;
+    let total_rows = pe.buffer.len().div_ceil(BYTES_PER_ROW);
     let row_height = 18.0;
 
     egui::Frame::none().inner_margin(egui::Margin::symmetric(12.0, 6.0)).show(ui, |ui| {
@@ -56,7 +56,7 @@ pub fn render_hexview(ui: &mut Ui, pe: &PeInfo) {
                 ascii_buf.clear();
                 for i in 0..count {
                     let b = unsafe { *ptr.add(offset + i) };
-                    ascii_buf.push(if b >= 0x20 && b <= 0x7E { b } else { b'.' });
+                    ascii_buf.push(if (0x20..=0x7E).contains(&b) { b } else { b'.' });
                 }
                 let ascii_str = unsafe { std::str::from_utf8_unchecked(&ascii_buf) };
 

@@ -202,7 +202,7 @@ pub fn parse_go_pclntab(buffer: &[u8]) -> Option<GoInfo> {
                 let str_start = i;
                 while i < buf_len {
                     let c = unsafe { *base.add(i) };
-                    if c < 0x20 || c > 0x7E { break; }
+                    if !(0x20..=0x7E).contains(&c) { break; }
                     i += 1;
                 }
                 let slen = i - str_start;
@@ -499,7 +499,7 @@ pub fn scan_embedded_artifacts(buffer: &[u8], sections: &[SectionInfo]) -> Vec<E
                     u32::from_le(std::ptr::read_unaligned(base.add(pos + 0x3C) as *const u32))
                 } as usize;
                 let pe_sig_off = pos + e_lfanew;
-                if e_lfanew >= 0x40 && e_lfanew < 0x1000 && pe_sig_off + 4 <= len {
+                if (0x40..0x1000).contains(&e_lfanew) && pe_sig_off + 4 <= len {
                     let pe_sig = unsafe {
                         u32::from_le(std::ptr::read_unaligned(base.add(pe_sig_off) as *const u32))
                     };

@@ -226,13 +226,13 @@ fn parse_exports(pe: &VecPE, buffer: &[u8]) -> Option<ExportInfo> {
     let export_end_rva = export_rva + export_size;
     let mut exports = Vec::with_capacity(count);
 
-    for i in 0..count {
+    for (i, nm) in name_map.iter_mut().enumerate().take(count) {
         if func_off + i * 4 + 4 > buffer.len() { break; }
         let frva = unsafe { read_u32_le(buffer, func_off + i * 4) };
         if frva == 0 { continue; }
 
         let ordinal = (ordinal_base as u16).wrapping_add(i as u16);
-        let name = name_map[i].take();
+        let name = nm.take();
 
         let forwarded = if frva >= export_rva && frva < export_end_rva {
             rva_to_offset(pe, frva).map(|o| read_cstring(buffer, o))
@@ -247,7 +247,7 @@ fn parse_exports(pe: &VecPE, buffer: &[u8]) -> Option<ExportInfo> {
 }
 
 fn compute_block_entropy(buffer: &[u8], block_size: usize) -> Vec<f32> {
-    let n = (buffer.len() + block_size - 1) / block_size;
+    let n = buffer.len().div_ceil(block_size);
     let mut result = Vec::with_capacity(n);
     let mut offset = 0usize;
     while offset < buffer.len() {
@@ -405,11 +405,11 @@ fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8]) -> (Vec<DisasmLine>, DisasmM
         let lo = arcs[i].from.min(arcs[i].to) as usize;
         let hi = arcs[i].from.max(arcs[i].to) as usize;
         let mut used: u16 = 0;
-        for j in 0..i {
-            let jlo = arcs[j].from.min(arcs[j].to) as usize;
-            let jhi = arcs[j].from.max(arcs[j].to) as usize;
+        for arc in &arcs[..i] {
+            let jlo = arc.from.min(arc.to) as usize;
+            let jhi = arc.from.max(arc.to) as usize;
             if jlo <= hi && jhi >= lo {
-                let c = arcs[j].col;
+                let c = arc.col;
                 if c < 12 { used |= 1 << c; }
             }
         }
@@ -624,7 +624,7 @@ fn parse_resources(pe: &VecPE, buffer: &[u8]) -> Option<ResourceInfo> {
     Some(info)
 }
 
-fn walk_resource_to_data<'a>(buffer: &'a [u8], rsrc_off: usize, l2_off: usize) -> Option<&'a [u8]> {
+fn walk_resource_to_data(buffer: &[u8], rsrc_off: usize, l2_off: usize) -> Option<&[u8]> {
     if l2_off + 16 > buffer.len() { return None; }
     let num2 = (unsafe { read_u16_le(buffer, l2_off + 12) } as usize
               + unsafe { read_u16_le(buffer, l2_off + 14) } as usize).min(16);
@@ -650,7 +650,7 @@ fn walk_resource_to_data<'a>(buffer: &'a [u8], rsrc_off: usize, l2_off: usize) -
     read_resource_data_entry(buffer, rsrc_off + offset2 as usize)
 }
 
-fn read_resource_data_entry<'a>(buffer: &'a [u8], entry_off: usize) -> Option<&'a [u8]> {
+fn read_resource_data_entry(buffer: &[u8], entry_off: usize) -> Option<&[u8]> {
     if entry_off + 16 > buffer.len() { return None; }
     let data_rva  = unsafe { read_u32_le(buffer, entry_off) };
     let data_size = unsafe { read_u32_le(buffer, entry_off + 4) } as usize;
@@ -1004,7 +1004,7 @@ fn extract_strings(data: &[u8], base_offset: usize, section: &str) -> Vec<Extrac
         while i < aligned_end {
             let lo = unsafe { *data.get_unchecked(i) };
             let hi = unsafe { *data.get_unchecked(i + 1) };
-            let printable = hi == 0 && ((lo >= 0x20 && lo <= 0x7E) || lo == 0x09);
+            let printable = hi == 0 && ((0x20..=0x7E).contains(&lo) || lo == 0x09);
             if printable {
                 if wstart.is_none() { wstart = Some(i); }
                 wbuf.push(lo);
@@ -1164,7 +1164,7 @@ fn starts_with_ignore_ascii_case(haystack: &[u8], needle: &[u8]) -> bool {
 #[inline]
 fn looks_like_base64(s: &str) -> bool {
     let len = s.len();
-    if len < 16 || len % 4 != 0 { return false; }
+    if len < 16 || !len.is_multiple_of(4) { return false; }
     let ptr = s.as_ptr();
     let (mut eq, mut has_upper, mut has_lower, mut has_digit) = (0u8, false, false, false);
     for i in 0..len {

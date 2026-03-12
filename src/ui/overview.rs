@@ -209,7 +209,7 @@ pub fn render_overview(ui: &mut Ui, pe: &PeInfo, score: u8) {
             section_card(ui, |ui| {
                 let avail_w = ui.available_width() - 20.0;
                 let num_blocks = pe.block_entropy.len();
-                let px_per_block = (avail_w / num_blocks as f32).max(1.0).min(4.0);
+                let px_per_block = (avail_w / num_blocks as f32).clamp(1.0, 4.0);
                 let strip_w = (px_per_block * num_blocks as f32).min(avail_w);
                 let strip_h = 24.0;
                 let (rect, resp) = ui.allocate_exact_size(Vec2::new(strip_w, strip_h), egui::Sense::hover());

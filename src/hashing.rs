@@ -58,8 +58,8 @@ fn md5_compress(chunk: &[u8], state: &mut [u32; 4]) {
 
     let mut m = [0u32; 16];
     let base = chunk.as_ptr();
-    for i in 0..16 {
-        m[i] = unsafe {
+    for (i, slot) in m.iter_mut().enumerate() {
+        *slot = unsafe {
             u32::from_le(std::ptr::read_unaligned(base.add(i * 4) as *const u32))
         };
     }
@@ -140,8 +140,8 @@ fn sha256_compress(chunk: &[u8], h: &mut [u32; 8]) {
 
     let mut w = [0u32; 64];
     let base = chunk.as_ptr();
-    for i in 0..16 {
-        w[i] = unsafe {
+    for (i, slot) in w[..16].iter_mut().enumerate() {
+        *slot = unsafe {
             u32::from_be(std::ptr::read_unaligned(base.add(i * 4) as *const u32))
         };
     }
@@ -217,7 +217,7 @@ pub fn calculate_checksum(data: &[u8]) -> u32 {
                 cs = (cs & 0xFFFF_FFFF) + (cs >> 32);
             }
         }
-        if len % 2 != 0 {
+        if !len.is_multiple_of(2) {
             cs += *ptr.add(len - 1) as u64;
         }
     }

@@ -73,7 +73,7 @@ pub fn badge(ui: &mut Ui, text: &str, color: Color32) {
 pub fn truncate_path(path: &str, max_chars: usize) -> String {
     if path.len() <= max_chars { return path.to_string(); }
     let sep = if path.contains('\\') { '\\' } else { '/' };
-    if let Some(f) = path.split(sep).last() {
+    if let Some(f) = path.split(sep).next_back() {
         if f.len() + 6 <= max_chars { return format!("...\\{f}"); }
     }
     format!("...{}", &path[path.len()-max_chars+1..])
