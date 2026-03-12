@@ -376,6 +376,34 @@ pub fn render_overview(ui: &mut Ui, pe: &PeInfo, score: u8) {
             ui.add_space(16.0);
         }
 
+        if let Some(ref reloc) = pe.relocations {
+            section_header(ui, "Relocations");
+            section_card(ui, |ui| {
+                ui.label(RichText::new(format!("{} entries across {} blocks", reloc.total_entries, reloc.blocks.len())).size(13.0));
+                ui.add_space(4.0);
+                ui.collapsing(RichText::new(format!("Relocation Blocks  ({})", reloc.blocks.len())).size(13.0), |ui| {
+                    egui::Grid::new("ov_reloc").num_columns(3).spacing([14.0,3.0]).striped(true).min_col_width(80.0).show(ui, |ui| {
+                        ui.label(RichText::new("Page RVA").strong().size(12.0));
+                        ui.label(RichText::new("Entries").strong().size(12.0));
+                        ui.label(RichText::new("Types").strong().size(12.0));
+                        ui.end_row();
+                        for blk in reloc.blocks.iter().take(200) {
+                            ui.label(RichText::new(format!("0x{:08X}", blk.page_rva)).monospace().size(11.0));
+                            ui.label(RichText::new(format!("{}", blk.count)).monospace().size(11.0));
+                            let type_summary = reloc_type_summary(&blk.types);
+                            ui.label(RichText::new(type_summary).monospace().size(11.0).weak());
+                            ui.end_row();
+                        }
+                        if reloc.blocks.len() > 200 {
+                            ui.label(RichText::new(format!("... {} more blocks", reloc.blocks.len() - 200)).weak().italics().size(11.0));
+                            ui.end_row();
+                        }
+                    });
+                });
+            });
+            ui.add_space(16.0);
+        }
+
         section_header(ui, "File");
         section_card(ui, |ui| {
             grid(ui, "ov_file", |ui| {
@@ -390,4 +418,27 @@ pub fn render_overview(ui: &mut Ui, pe: &PeInfo, score: u8) {
 
         });
     });
+}
+
+fn reloc_type_summary(types: &[(u8, u16)]) -> String {
+    let mut counts = [0u32; 12];
+    for &(t, _) in types {
+        if (t as usize) < counts.len() { counts[t as usize] += 1; }
+    }
+    let mut parts = Vec::new();
+    for (t, &c) in counts.iter().enumerate() {
+        if c == 0 { continue; }
+        let name = match t {
+            0  => "ABS",
+            1  => "HIGH",
+            2  => "LOW",
+            3  => "HIGHLOW",
+            4  => "HIGHADJ",
+            5  => "MIPS_JMP",
+            10 => "DIR64",
+            _  => "?",
+        };
+        parts.push(format!("{c}x{name}"));
+    }
+    parts.join(" ")
 }

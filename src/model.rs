@@ -39,6 +39,8 @@ pub struct PeInfo {
     pub disasm_lines:      Vec<DisasmLine>,
     pub disasm_meta:       Option<DisasmMeta>,
     pub iat_map:           std::collections::HashMap<u64, String>,
+    pub string_xrefs:      std::collections::HashMap<u32, Vec<usize>>,
+    pub relocations:       Option<RelocationInfo>,
     pub buffer:            Vec<u8>,
 }
 
@@ -271,6 +273,17 @@ impl Default for DisasmSettings {
             max_arc_span:  200u16,
         }
     }
+}
+
+pub struct RelocationInfo {
+    pub total_entries: u32,
+    pub blocks:        Vec<RelocBlock>,
+}
+
+pub struct RelocBlock {
+    pub page_rva: u32,
+    pub count:    u16,
+    pub types:    Vec<(u8, u16)>,
 }
 
 #[derive(Default, PartialEq, Clone, Copy)]

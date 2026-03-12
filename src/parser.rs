@@ -124,9 +124,11 @@ pub fn parse_pe(path: &str) -> PeInfo {
 
     info.iat_map = build_iat_map(&pe, &buffer, is_64, info.image_base);
 
-    let (dlines, dmeta) = compute_disasm_lines(&info, &buffer);
+    let (dlines, dmeta, sxrefs) = compute_disasm_lines(&info, &buffer);
     info.disasm_lines = dlines;
     info.disasm_meta  = Some(dmeta);
+    info.string_xrefs = sxrefs;
+    info.relocations  = parse_relocations(&pe, &buffer);
 
     info.buffer = buffer;
 
@@ -258,8 +260,8 @@ fn compute_block_entropy(buffer: &[u8], block_size: usize) -> Vec<f32> {
     result
 }
 
-fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8]) -> (Vec<DisasmLine>, DisasmMeta) {
-    let empty = || (Vec::new(), DisasmMeta { calls: 0u16, jumps: 0u16, rets: 0u16, nops: 0u16, func_starts: Vec::new(), user_code: None, arcs: Vec::new(), ip_to_idx: std::collections::HashMap::new() });
+fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8]) -> (Vec<DisasmLine>, DisasmMeta, std::collections::HashMap<u32, Vec<usize>>) {
+    let empty = || (Vec::new(), DisasmMeta { calls: 0u16, jumps: 0u16, rets: 0u16, nops: 0u16, func_starts: Vec::new(), user_code: None, arcs: Vec::new(), ip_to_idx: std::collections::HashMap::new() }, std::collections::HashMap::new());
     if buffer.is_empty() { return empty(); }
 
     let ep_off = match find_ep_file_offset(pe) {
@@ -288,7 +290,8 @@ fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8]) -> (Vec<DisasmLine>, DisasmM
     let first_ip = instructions[0].ip();
     let last_ip  = instructions.last().map(|i| i.ip()).unwrap_or(first_ip);
 
-    let string_va_map = build_string_va_map(pe);
+    let (string_va_map, va_to_str_offset) = build_string_va_map(pe);
+    let mut string_xrefs: std::collections::HashMap<u32, Vec<usize>> = std::collections::HashMap::new();
 
     for (idx, instr) in instructions.iter().enumerate() {
         output.clear();
@@ -354,6 +357,17 @@ fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8]) -> (Vec<DisasmLine>, DisasmM
 
         let comment = build_comment(instr, &pe.iat_map, &string_va_map, target, bitness);
 
+        if comment.starts_with('"') {
+            for addr in [instr.memory_displacement64(), instr.immediate64()] {
+                if addr != 0 {
+                    if let Some(&str_off) = va_to_str_offset.get(&addr) {
+                        string_xrefs.entry(str_off).or_default().push(idx);
+                        break;
+                    }
+                }
+            }
+        }
+
         lines.push(DisasmLine {
             ip: instr_ip, rva, hex_bytes,
             opcode: opcode.to_string(), operands: operands.to_string(),
@@ -418,7 +432,7 @@ fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8]) -> (Vec<DisasmLine>, DisasmM
 
     meta.arcs = arcs;
 
-    (lines, meta)
+    (lines, meta, string_xrefs)
 }
 
 fn split_opcode_operands(text: &str) -> (&str, &str) {
@@ -428,13 +442,14 @@ fn split_opcode_operands(text: &str) -> (&str, &str) {
     }
 }
 
-fn build_string_va_map(pe: &PeInfo) -> std::collections::HashMap<u64, String> {
+fn build_string_va_map(pe: &PeInfo) -> (std::collections::HashMap<u64, String>, std::collections::HashMap<u64, u32>) {
     let mut sorted_secs: Vec<(u32, u32, u32)> = pe.sections.iter()
         .map(|s| (s.raw_offset, s.raw_size, s.virtual_addr))
         .collect();
     sorted_secs.sort_unstable_by_key(|e| e.0);
 
     let mut map = std::collections::HashMap::new();
+    let mut va_to_offset = std::collections::HashMap::new();
     for es in &pe.strings {
         let off = es.offset;
         let idx = sorted_secs.partition_point(|e| e.0 <= off);
@@ -449,8 +464,9 @@ fn build_string_va_map(pe: &PeInfo) -> std::collections::HashMap<u64, String> {
             format!("\"{}\"", es.value)
         };
         map.insert(va, preview);
+        va_to_offset.insert(va, off);
     }
-    map
+    (map, va_to_offset)
 }
 
 fn build_comment(
@@ -483,6 +499,54 @@ fn build_comment(
     }
 
     String::new()
+}
+
+
+fn parse_relocations(pe: &exe::pe::VecPE, buffer: &[u8]) -> Option<RelocationInfo> {
+    use exe::headers::ImageDirectoryEntry;
+
+    let reloc_dir = pe.get_data_directory(ImageDirectoryEntry::BaseReloc).ok()?;
+    let reloc_rva = reloc_dir.virtual_address.0;
+    let reloc_size = reloc_dir.size as usize;
+    if reloc_rva == 0 || reloc_size == 0 { return None; }
+
+    let reloc_off = rva_to_offset(pe, reloc_rva)? ;
+    if reloc_off + reloc_size > buffer.len() { return None; }
+
+    let mut blocks = Vec::new();
+    let mut total_entries: u32 = 0;
+    let mut pos = reloc_off;
+    let end = reloc_off + reloc_size;
+
+    while pos + 8 <= end {
+        let page_rva = unsafe { read_u32_le(buffer, pos) };
+        let block_size = unsafe { read_u32_le(buffer, pos + 4) } as usize;
+        if block_size < 8 || pos + block_size > end { break; }
+
+        let num_entries = (block_size - 8) / 2;
+        let mut types = Vec::with_capacity(num_entries);
+
+        for i in 0..num_entries {
+            let entry = unsafe { read_u16_le(buffer, pos + 8 + i * 2) };
+            let reloc_type = (entry >> 12) as u8;
+            let offset = entry & 0x0FFF;
+            if reloc_type != 0 { // skip IMAGE_REL_BASED_ABSOLUTE (padding)
+                types.push((reloc_type, offset));
+            }
+        }
+
+        total_entries += types.len() as u32;
+        blocks.push(RelocBlock {
+            page_rva,
+            count: types.len() as u16,
+            types,
+        });
+
+        pos += block_size;
+    }
+
+    if blocks.is_empty() { return None; }
+    Some(RelocationInfo { total_entries, blocks })
 }
 
 fn detect_prologue(instrs: &[Instruction], idx: usize, bitness: u32) -> bool {

@@ -121,6 +121,16 @@ impl eframe::App for SixEyesApp {
             }
         }
 
+        // Drag-and-drop support
+        let dropped: Vec<_> = ctx.input(|i| {
+            i.raw.dropped_files.iter()
+                .filter_map(|f| f.path.as_ref().map(|p| p.to_string_lossy().to_string()))
+                .collect()
+        });
+        if let Some(path) = dropped.into_iter().next() {
+            self.load(parse_pe(&path));
+        }
+
         egui::TopBottomPanel::top("title_sep").exact_height(1.0)
             .frame(egui::Frame::none().fill(Color32::from_rgb(45, 50, 65)))
             .show(ctx, |_ui| {});
@@ -202,7 +212,12 @@ impl eframe::App for SixEyesApp {
                     Some(pe) => match self.active_tab {
                         Tab::Overview   => overview::render_overview(ui, pe, self.threat_score),
                         Tab::Imports    => imports::render_imports(ui, pe),
-                        Tab::Strings    => strings::render_strings(ui, pe, &mut self.string_filter, &mut self.string_kind_filter),
+                        Tab::Strings    => {
+                            if let Some(disasm_idx) = strings::render_strings(ui, pe, &mut self.string_filter, &mut self.string_kind_filter) {
+                                self.active_tab = Tab::Disasm;
+                                self.disasm_scroll_to = Some(disasm_idx);
+                            }
+                        },
                         Tab::Heuristics => heuristics::render_heuristics(ui, &self.heuristic_flags),
                         Tab::HexView    => hexview::render_hexview(ui, pe),
                         Tab::Disasm     => disasm::render_disasm(ui, pe, &mut self.disasm_goto, &mut self.disasm_search, &mut self.disasm_scroll_to, &mut self.disasm_scroll_target_px, &mut self.disasm_scroll_current_px, &mut self.disasm_settings),
