@@ -551,8 +551,6 @@ fn parse_relocations(pe: &exe::pe::VecPE, buffer: &[u8]) -> Option<RelocationInf
 
 fn detect_prologue(instrs: &[Instruction], idx: usize, bitness: u32) -> bool {
     let instr = &instrs[idx];
-    let code = instr.code();
-    let code_val = code as u32;
 
     let is_push_bp = {
         let op_count = instr.op_count();
@@ -561,7 +559,7 @@ fn detect_prologue(instrs: &[Instruction], idx: usize, bitness: u32) -> bool {
             use iced_x86::Register;
             matches!(reg, Register::RBP | Register::EBP)
                 && instr.flow_control() == FlowControl::Next
-                && is_push_code(code_val)
+                && instr.mnemonic() == iced_x86::Mnemonic::Push
         } else {
             false
         }
@@ -594,10 +592,6 @@ fn detect_prologue(instrs: &[Instruction], idx: usize, bitness: u32) -> bool {
     false
 }
 
-#[inline]
-fn is_push_code(_code_val: u32) -> bool {
-    true
-}
 
 fn find_ep_file_offset(pe: &PeInfo) -> Option<usize> {
     let ep = pe.entry_point;

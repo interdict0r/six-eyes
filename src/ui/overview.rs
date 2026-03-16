@@ -211,17 +211,54 @@ pub fn render_overview(ui: &mut Ui, pe: &PeInfo, score: u8) {
                 let num_blocks = pe.block_entropy.len();
                 let px_per_block = (avail_w / num_blocks as f32).clamp(1.0, 4.0);
                 let strip_w = (px_per_block * num_blocks as f32).min(avail_w);
-                let strip_h = 24.0;
+                let strip_h = 40.0;
                 let (rect, resp) = ui.allocate_exact_size(Vec2::new(strip_w, strip_h), egui::Sense::hover());
 
+                // Background
+                ui.painter().rect_filled(rect, 0.0, Color32::from_rgb(22, 24, 32));
+
+                // Per-block entropy bars (drawn as vertical fills from bottom)
                 for (i, &ent) in pe.block_entropy.iter().enumerate() {
                     let x = rect.min.x + i as f32 * px_per_block;
                     if x > rect.max.x { break; }
                     let w = px_per_block.min(rect.max.x - x);
                     let color = entropy_color(ent);
-                    let block_rect = Rect::from_min_size(egui::pos2(x, rect.min.y), Vec2::new(w, strip_h));
-                    ui.painter().rect_filled(block_rect, 0.0, color);
+                    let fill_h = (ent / 8.0 * strip_h).clamp(1.0, strip_h);
+                    let block_rect = Rect::from_min_size(
+                        egui::pos2(x, rect.max.y - fill_h),
+                        Vec2::new(w, fill_h),
+                    );
+                    let dim = Color32::from_rgba_premultiplied(color.r()/3, color.g()/3, color.b()/3, 180);
+                    ui.painter().rect_filled(block_rect, 0.0, dim);
+                    // bright top pixel
+                    ui.painter().rect_filled(
+                        Rect::from_min_size(egui::pos2(x, rect.max.y - fill_h), Vec2::new(w, 2.0)),
+                        0.0, color,
+                    );
                 }
+
+                // Section boundary tick marks
+                let file_size = pe.file_size.max(1) as f32;
+                for sec in &pe.sections {
+                    if sec.raw_size == 0 { continue; }
+                    let sec_x = rect.min.x + (sec.raw_offset as f32 / file_size) * strip_w;
+                    if sec_x < rect.min.x || sec_x > rect.max.x { continue; }
+                    // Tick line
+                    ui.painter().line_segment(
+                        [egui::pos2(sec_x, rect.min.y), egui::pos2(sec_x, rect.max.y)],
+                        Stroke::new(1.0, Color32::from_rgba_premultiplied(200, 200, 220, 120)),
+                    );
+                    // Section name label above strip
+                    let label_pos = egui::pos2(sec_x + 2.0, rect.min.y + 2.0);
+                    ui.painter().text(
+                        label_pos,
+                        egui::Align2::LEFT_TOP,
+                        &sec.name,
+                        egui::FontId::monospace(9.0),
+                        Color32::from_rgba_premultiplied(180, 180, 200, 180),
+                    );
+                }
+
                 ui.painter().rect_stroke(rect, 0.0, Stroke::new(1.0, Color32::from_rgb(50,52,60)));
 
                 if resp.hovered() {
@@ -230,8 +267,17 @@ pub fn render_overview(ui: &mut Ui, pe: &PeInfo, score: u8) {
                             let idx = ((pos.x - rect.min.x) / px_per_block) as usize;
                             if idx < pe.block_entropy.len() {
                                 let file_offset = idx * 1024;
+                                // find which section this offset belongs to
+                                let sec_name = pe.sections.iter()
+                                    .find(|s| {
+                                        let start = s.raw_offset as usize;
+                                        let end = start + s.raw_size as usize;
+                                        file_offset >= start && file_offset < end
+                                    })
+                                    .map(|s| s.name.as_str())
+                                    .unwrap_or("(between sections)");
                                 egui::show_tooltip_at_pointer(ui.ctx(), egui::Id::new("ent_tip"), |ui| {
-                                    ui.label(format!("Offset: 0x{:X}\nEntropy: {:.4}", file_offset, pe.block_entropy[idx]));
+                                    ui.label(format!("Offset: 0x{file_offset:X}\nEntropy: {:.4}\nSection: {sec_name}", pe.block_entropy[idx]));
                                 });
                             }
                         }
@@ -413,6 +459,23 @@ pub fn render_overview(ui: &mut Ui, pe: &PeInfo, score: u8) {
                 kv(ui, "SHA-256", &pe.sha256);
                 if !pe.imphash.is_empty() { kv(ui, "ImpHash", &pe.imphash); }
                 if let Some(ref rh) = pe.rich_hash { kv(ui, "RichHash", rh); }
+            });
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                let vt_url = format!("https://www.virustotal.com/gui/file/{}", pe.sha256);
+                if ui.button(RichText::new("VirusTotal (SHA-256)").size(12.0)).clicked() {
+                    let _ = open::that(&vt_url);
+                }
+                if !pe.imphash.is_empty() {
+                    let iph_url = format!("https://www.virustotal.com/gui/search/{}", pe.imphash);
+                    if ui.button(RichText::new("VirusTotal (ImpHash)").size(12.0)).clicked() {
+                        let _ = open::that(&iph_url);
+                    }
+                }
+                if ui.button(RichText::new("MalwareBazaar").size(12.0)).clicked() {
+                    let mb_url = format!("https://bazaar.abuse.ch/browse.php?search=sha256:{}", pe.sha256);
+                    let _ = open::that(&mb_url);
+                }
             });
         });
 

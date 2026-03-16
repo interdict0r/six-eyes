@@ -121,7 +121,6 @@ pub struct OverlayInfo {
     pub size:   u32,
 }
 
-#[allow(dead_code)]
 pub struct ExportInfo {
     pub dll_name:  String,
     pub num_funcs: u32,
@@ -154,7 +153,6 @@ pub struct VersionInfo {
     pub original_filename: Option<String>,
 }
 
-#[allow(dead_code)]
 pub struct CertificateInfo {
     pub offset:     u32,
     pub size:       u32,
@@ -287,7 +285,7 @@ pub struct RelocBlock {
 }
 
 #[derive(Default, PartialEq, Clone, Copy)]
-pub enum Tab { #[default] Overview, Imports, Strings, Heuristics, HexView, Disasm }
+pub enum Tab { #[default] Overview, Imports, Exports, Strings, Heuristics, HexView, Disasm }
 
 #[derive(Default, PartialEq, Clone, Copy)]
 pub enum StringKindFilter { #[default] All, Ascii, Wide, Obfuscated }

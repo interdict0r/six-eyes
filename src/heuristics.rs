@@ -130,6 +130,79 @@ pub const CAPABILITIES: &[CapabilityDef] = &[
         mitre: "T1113", threat: 1,
         apis: &["BitBlt","GetDC","GetWindowDC","CreateCompatibleBitmap","PrintWindow"],
     },
+    CapabilityDef {
+        name: "Credential Dumping", description: "Dump credentials from memory or registry hives",
+        mitre: "T1003", threat: 2,
+        apis: &["MiniDumpWriteDump","SamConnect","SamOpenDomain","SamOpenUser",
+                "SamGetMembersInAlias","LsaOpenPolicy","LsaQueryInformationPolicy",
+                "NtReadVirtualMemory","ReadProcessMemory","LsaEnumerateLogonSessions"],
+    },
+    CapabilityDef {
+        name: "AMSI Bypass", description: "Disable Antimalware Scan Interface to evade detection",
+        mitre: "T1562.001", threat: 2,
+        apis: &["AmsiScanBuffer","AmsiInitialize","AmsiOpenSession","AmsiScanString",
+                "AmsiCloseSession","AmsiUninitialize"],
+    },
+    CapabilityDef {
+        name: "ETW Bypass", description: "Disable Event Tracing for Windows to blind logging",
+        mitre: "T1562.006", threat: 2,
+        apis: &["EtwEventWrite","EtwEventWriteFull","NtTraceControl","NtTraceEvent",
+                "EtwRegister","EtwUnregister"],
+    },
+    CapabilityDef {
+        name: "Lateral Movement", description: "Access remote systems via network shares or WMI",
+        mitre: "T1021", threat: 2,
+        // CoCreateInstance and WinExec omitted: too broad (COM is ubiquitous; WinExec already
+        // covered by Process Creation). IWbemServices is a COM interface, not an importable symbol.
+        apis: &["WNetAddConnection2A","WNetAddConnection2W","WNetAddConnectionA","WNetOpenEnumA",
+                "NetShareEnum","NetShareGetInfo","NetSessionEnum"],
+    },
+    CapabilityDef {
+        name: "Scheduled Task / Job", description: "Create or modify scheduled tasks for persistence",
+        mitre: "T1053.005", threat: 2,
+        // ITaskService, IRegisteredTask, ITaskFolder, ITaskDefinition are COM interface names —
+        // they never appear in a PE import table. Only importable scheduler APIs are listed.
+        apis: &["NetScheduleJobAdd","NetScheduleJobEnum"],
+    },
+    CapabilityDef {
+        name: "System Discovery", description: "Enumerate system information, users, or network config",
+        mitre: "T1082", threat: 0,
+        apis: &["GetSystemInfo","GetComputerNameA","GetComputerNameW","GetComputerNameExA",
+                "GetUserNameA","GetUserNameW","GetAdaptersInfo","GetAdaptersAddresses",
+                "EnumSystemLocalesA","GetNativeSystemInfo","RtlGetVersion",
+                "NetGetJoinInformation","GetTcpTable","GetUdpTable"],
+    },
+    CapabilityDef {
+        name: "Mouse / Input Capture", description: "Hook mouse events or capture input",
+        mitre: "T1056.002", threat: 2,
+        apis: &["SetWindowsHookExA","SetWindowsHookExW","mouse_event","SendInput",
+                "GetCursorPos","SetCursorPos","GetDoubleClickTime"],
+    },
+    CapabilityDef {
+        name: "Data Exfiltration", description: "Upload or send data to remote locations",
+        mitre: "T1041", threat: 2,
+        apis: &["InternetWriteFile","FtpPutFileA","FtpPutFileW","FtpOpenFileA",
+                "WinHttpSendRequest","WinHttpWriteData","WSASend","sendto"],
+    },
+    CapabilityDef {
+        name: "COM Object Hijacking", description: "Abuse COM infrastructure for execution or persistence",
+        mitre: "T1546.015", threat: 2,
+        apis: &["CoCreateInstance","CoCreateInstanceEx","CoGetClassObject",
+                "OleInitialize","CoInitializeEx","CoRegisterClassObject"],
+    },
+    CapabilityDef {
+        name: "Named Pipe / IPC", description: "Use named pipes for inter-process communication or C2",
+        mitre: "T1071.004", threat: 1,
+        apis: &["CreateNamedPipeA","CreateNamedPipeW","ConnectNamedPipe","DisconnectNamedPipe",
+                "WaitNamedPipeA","CallNamedPipeA","TransactNamedPipe"],
+    },
+    CapabilityDef {
+        name: "Window Enumeration", description: "Enumerate windows, possibly for process/sandbox detection",
+        mitre: "T1010", threat: 0,
+        apis: &["EnumWindows","FindWindowA","FindWindowW","FindWindowExA","FindWindowExW",
+                "GetForegroundWindow","GetWindowTextA","GetWindowTextLengthA",
+                "GetClassName","GetWindowThreadProcessId"],
+    },
 ];
 
 pub struct MatchedCapability {
@@ -304,6 +377,108 @@ pub fn build_heuristic_flags(pe: &PeInfo) -> Vec<HeuristicFlag> {
     check_api_set(&mut flags, &all_fns, "Imports", Severity::Critical,
         &["OpenProcessToken","AdjustTokenPrivileges","LookupPrivilegeValueA","ImpersonateLoggedOnUser"],
         "Token Manipulation [T1134]");
+    check_api_set(&mut flags, &all_fns, "Imports", Severity::Critical,
+        &["MiniDumpWriteDump","SamConnect","LsaOpenPolicy","LsaQueryInformationPolicy","SamOpenDomain"],
+        "Credential Dumping [T1003]");
+    check_api_set(&mut flags, &all_fns, "Imports", Severity::Critical,
+        &["AmsiScanBuffer","AmsiInitialize","AmsiOpenSession"],
+        "AMSI Bypass [T1562.001]");
+    // EtwEventWrite omitted: imported by any program emitting ETW diagnostic events (normal).
+    // NtTraceControl / NtTraceEvent are low-level Nt* calls not used in legitimate user-mode code.
+    check_api_set(&mut flags, &all_fns, "Imports", Severity::Critical,
+        &["NtTraceControl","NtTraceEvent"],
+        "ETW Bypass [T1562.006]");
+    check_api_set(&mut flags, &all_fns, "Imports", Severity::Critical,
+        &["WNetAddConnection2A","WNetAddConnection2W","NetShareEnum","NetSessionEnum"],
+        "Lateral Movement [T1021]");
+    // ITaskService is a COM interface name, not an importable symbol — excluded.
+    check_api_set(&mut flags, &all_fns, "Imports", Severity::Critical,
+        &["NetScheduleJobAdd","NetScheduleJobEnum"],
+        "Scheduled Task [T1053.005]");
+    check_api_set(&mut flags, &all_fns, "Imports", Severity::Critical,
+        &["InternetWriteFile","FtpPutFileA","FtpPutFileW","WinHttpWriteData"],
+        "Data Exfiltration [T1041]");
+    check_api_set(&mut flags, &all_fns, "Imports", Severity::Warn,
+        &["CreateNamedPipeA","CreateNamedPipeW","ConnectNamedPipe"],
+        "Named Pipe IPC [T1071.004]");
+    check_api_set(&mut flags, &all_fns, "Imports", Severity::Warn,
+        &["GetSystemInfo","GetComputerNameA","GetComputerNameW","GetAdaptersInfo","GetNativeSystemInfo"],
+        "System Discovery [T1082]");
+
+    // String-based heuristics — catches evidence invisible to import-only analysis
+    {
+        let string_vals: Vec<&str> = pe.strings.iter().map(|s| s.value.as_str()).collect();
+
+        // Persistence via registry Run key
+        if string_vals.iter().any(|s| s.contains("CurrentVersion\\Run") || s.contains("CurrentVersion/Run")) {
+            f!(Severity::Critical, "Strings", "Registry Run key path detected — likely persistence [T1547.001]");
+        }
+
+        // LSASS memory access pattern
+        if string_vals.iter().any(|s| s.contains("lsass") || s.contains("LSASS")) {
+            f!(Severity::Critical, "Strings", "LSASS process name in strings — possible credential dumping [T1003.001]");
+        }
+
+        // Scheduled task command
+        // "at.exe" is excluded as a substring match — it matches "bloat.exe", "data.exe", etc.
+        // Require schtasks or a combined /create+task signal instead.
+        if string_vals.iter().any(|s| {
+            let l = s.to_ascii_lowercase();
+            l.contains("schtasks") || (l.contains("/create") && l.contains("task"))
+        }) {
+            f!(Severity::Critical, "Strings", "Scheduled task command in strings — likely persistence [T1053.005]");
+        }
+
+        // PowerShell encoded command (common stager)
+        if string_vals.iter().any(|s| {
+            let l = s.to_ascii_lowercase();
+            l.contains("powershell") && (l.contains("-enc") || l.contains("-encodedcommand") || l.contains("-nop"))
+        }) {
+            f!(Severity::Critical, "Strings", "PowerShell encoded/no-profile command — likely stager [T1059.001]");
+        }
+
+        // cmd /c execution
+        if string_vals.iter().any(|s| {
+            let l = s.to_ascii_lowercase();
+            (l.contains("cmd.exe") || l.contains("cmd /c") || l.contains("cmd.exe /c")) && l.len() > 6
+        }) {
+            f!(Severity::Warn, "Strings", "cmd.exe execution string — command execution [T1059.003]");
+        }
+
+        // Temp/shadow drop paths
+        if string_vals.iter().any(|s| {
+            let l = s.to_ascii_lowercase();
+            l.contains("%temp%") || l.contains("%appdata%") || l.contains("\\temp\\") || l.contains("/tmp/")
+        }) {
+            f!(Severity::Warn, "Strings", "Temp/AppData path in strings — possible dropper staging [T1027]");
+        }
+
+        // Volume shadow copy deletion (ransomware tell)
+        if string_vals.iter().any(|s| {
+            let l = s.to_ascii_lowercase();
+            l.contains("vssadmin") || l.contains("shadowcopy") || l.contains("wmic shadowcopy delete")
+        }) {
+            f!(Severity::Critical, "Strings", "Shadow copy deletion strings — ransomware indicator [T1490]");
+        }
+
+        // Named pipe C2 pattern
+        if string_vals.iter().any(|s| s.starts_with("\\\\.\\pipe\\") || s.starts_with("\\\\\\\\")) {
+            f!(Severity::Warn, "Strings", "Named pipe path in strings — possible C2 or lateral movement channel");
+        }
+
+        // AMSI/ETW patch signatures in strings (in-memory patching)
+        if string_vals.iter().any(|s| {
+            let l = s.to_ascii_lowercase();
+            l.contains("amsi.dll") || l.contains("amsiscanbuffer")
+        }) {
+            f!(Severity::Critical, "Strings", "AMSI DLL/function name in strings — likely in-memory bypass [T1562.001]");
+        }
+
+        // Tor / onion C2
+        if string_vals.iter().any(|s| s.contains(".onion")) {
+            f!(Severity::Critical, "Strings", "Tor .onion address detected — anonymized C2 infrastructure");
+        }
+    }
 
     if !pe.checksum_ok {
         f!(Severity::Warn, "Structure",

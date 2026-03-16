@@ -1,5 +1,6 @@
 pub mod overview;
 pub mod imports;
+pub mod exports;
 pub mod strings;
 pub mod heuristics;
 pub mod titlebar;

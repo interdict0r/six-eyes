@@ -356,6 +356,33 @@ static EP_SIGNATURES: &[EpSignature] = &[
         mask:  &[0xFF, 0xFF, 0x00, 0x00, 0xFF],
         detail: "Obsidium junk-jump entry",
     },
+    // NSIS installer: PUSH <addr>; CALL <NullsoftInstallationSystem>
+    EpSignature {
+        name: "NSIS Installer",
+        bytes: &[0x81, 0xEC, 0x00, 0x00, 0x00, 0x00, 0x53, 0x55, 0x56, 0x57],
+        mask:  &[0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF],
+        detail: "NSIS (Nullsoft Scriptable Install System) entry stub",
+    },
+    // Inno Setup: push ebp; push <const>; mov ebp, esp; push -1 (distinctive 3-arg form)
+    // NOTE: the generic prologue (55 8B EC 83 C4...) was removed — too broad (standard MSVC prologue).
+    // String-based detection in detect_installer_markers() is sufficient for Inno Setup.
+    // tElock: push ebp; xor eax, eax; push eax; push fs:[eax]
+    EpSignature {
+        name: "tElock",
+        bytes: &[0x55, 0x33, 0xC0, 0x50, 0x64, 0xFF, 0x30, 0x64, 0x89, 0x20],
+        mask:  &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
+        detail: "tElock SEH-chain entry stub",
+    },
+    // ExeCryptor: CALL +5; POP EAX; MOV EBP, EAX; SUB EBP, <off>
+    EpSignature {
+        name: "ExeCryptor",
+        bytes: &[0xE8, 0x00, 0x00, 0x00, 0x00, 0x58, 0x8B, 0xE8, 0x2B],
+        mask:  &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
+        detail: "ExeCryptor GetPC + EBP delta stub",
+    },
+    // WinRAR SFX: removed — "6A FF 68 xx xx xx xx 64 A1 00 00 00 00" is the standard MSVC SEH
+    // prolog emitted by any MSVC function with try/except. Far too broad as an EP heuristic.
+    // String-based detection in detect_installer_markers() handles WinRAR SFX reliably.
 ];
 
 struct SectionPattern {
@@ -376,6 +403,15 @@ static SECTION_PATTERNS: &[SectionPattern] = &[
     SectionPattern { name: "Obsidium",     names: &[".obsidiu"],                     detail: "Obsidium section name" },
     SectionPattern { name: "NSPack",       names: &[".nsp0", ".nsp1", ".nsp2"],      detail: "NSPack section names" },
     SectionPattern { name: "RLPack",       names: &[".RLPack"],                        detail: "RLPack section name" },
+    SectionPattern { name: "NSIS Installer",     names: &[".ndata"],                   detail: "NSIS data section (.ndata)" },
+    SectionPattern { name: "tElock",             names: &["tElock"],                    detail: "tElock section name" },
+    // NOTE: ".tls" was intentionally excluded — it is a standard PE section for thread-local
+    // storage present in Rust, Go, .NET, and MSVC binaries. Using it would false-positive
+    // on almost every modern binary.
+    SectionPattern { name: "yoda Protector",     names: &["yP", "yC"],                 detail: "yoda's Protector section names" },
+    SectionPattern { name: "EXECrypter",         names: &["ExeS"],                     detail: "EXECrypter section name" },
+    SectionPattern { name: "WinZip SFX",          names: &["setup_1"],                  detail: "WinZip SFX section name" },
+    SectionPattern { name: "Armadillo",          names: &[".shrink1", ".shrink2"],     detail: "Armadillo packer section names" },
 ];
 
 fn match_ep_signature(ep_bytes: &[u8]) -> Option<(&'static str, &'static str)> {
@@ -477,6 +513,131 @@ pub fn detect_packer(
         }
     }
 
+    // .NET protector / installer detection via buffer string markers
+    if let Some(result) = detect_dotnet_protector(buffer) {
+        return Some(result);
+    }
+    if let Some(result) = detect_installer_markers(buffer) {
+        return Some(result);
+    }
+
+    None
+}
+
+fn buf_contains(buffer: &[u8], needle: &[u8]) -> bool {
+    buffer.windows(needle.len()).any(|w| w == needle)
+}
+
+fn detect_dotnet_protector(buffer: &[u8]) -> Option<PackerInfo> {
+    // ConfuserEx: embeds module-level name or Costura resource loader
+    if buf_contains(buffer, b"ConfuserEx") || buf_contains(buffer, b"Costura.AssemblyLoader") {
+        return Some(PackerInfo {
+            name: "ConfuserEx",
+            confidence: PackerConfidence::High,
+            details: "ConfuserEx marker string detected in binary".to_string(),
+        });
+    }
+    // Confuser (original): older marker
+    if buf_contains(buffer, b"Confuser v") {
+        return Some(PackerInfo {
+            name: "Confuser",
+            confidence: PackerConfidence::High,
+            details: "Confuser version marker string detected".to_string(),
+        });
+    }
+    // .NET Reactor: distinctive section or string
+    if buf_contains(buffer, b"NETReactor") || buf_contains(buffer, b".NETReactor") {
+        return Some(PackerInfo {
+            name: ".NET Reactor",
+            confidence: PackerConfidence::High,
+            details: ".NET Reactor marker string detected".to_string(),
+        });
+    }
+    // Eazfuscator
+    if buf_contains(buffer, b"Eazfuscator.NET") {
+        return Some(PackerInfo {
+            name: "Eazfuscator",
+            confidence: PackerConfidence::High,
+            details: "Eazfuscator.NET marker string detected".to_string(),
+        });
+    }
+    // SmartAssembly — only the specific obfuscation phrase; bare "SmartAssembly" is too broad
+    // (could appear in any documentation text or version info referencing the tool).
+    if buf_contains(buffer, b"Obfuscated with SmartAssembly") {
+        return Some(PackerInfo {
+            name: "SmartAssembly",
+            confidence: PackerConfidence::High,
+            details: "SmartAssembly obfuscation marker detected".to_string(),
+        });
+    }
+    // Dotfuscator
+    if buf_contains(buffer, b"Dotfuscator") {
+        return Some(PackerInfo {
+            name: "Dotfuscator",
+            confidence: PackerConfidence::High,
+            details: "Dotfuscator marker string detected".to_string(),
+        });
+    }
+    // de4dot (deobfuscated marker — ironic, but common in repackaged samples)
+    if buf_contains(buffer, b"de4dot") {
+        return Some(PackerInfo {
+            name: "de4dot-processed",
+            confidence: PackerConfidence::Medium,
+            details: "de4dot deobfuscation marker — binary was likely previously obfuscated".to_string(),
+        });
+    }
+    None
+}
+
+fn detect_installer_markers(buffer: &[u8]) -> Option<PackerInfo> {
+    // NSIS: Nullsoft Scriptable Install System
+    if buf_contains(buffer, b"Nullsoft Install System") || buf_contains(buffer, b"NullsoftInst") {
+        return Some(PackerInfo {
+            name: "NSIS Installer",
+            confidence: PackerConfidence::High,
+            details: "Nullsoft Install System marker string detected".to_string(),
+        });
+    }
+    // Inno Setup
+    if buf_contains(buffer, b"Inno Setup") || buf_contains(buffer, b"InnoSetup") {
+        return Some(PackerInfo {
+            name: "Inno Setup",
+            confidence: PackerConfidence::High,
+            details: "Inno Setup marker string detected".to_string(),
+        });
+    }
+    // InstallShield
+    if buf_contains(buffer, b"InstallShield") {
+        return Some(PackerInfo {
+            name: "InstallShield",
+            confidence: PackerConfidence::High,
+            details: "InstallShield installer marker detected".to_string(),
+        });
+    }
+    // WiX Toolset
+    if buf_contains(buffer, b"WiX Toolset") || buf_contains(buffer, b"Windows Installer XML") {
+        return Some(PackerInfo {
+            name: "WiX Installer",
+            confidence: PackerConfidence::High,
+            details: "WiX Toolset installer marker detected".to_string(),
+        });
+    }
+    // 7-Zip SFX
+    if buf_contains(buffer, b"7-Zip") && buf_contains(buffer, b"SFX") {
+        return Some(PackerInfo {
+            name: "7-Zip SFX",
+            confidence: PackerConfidence::High,
+            details: "7-Zip self-extracting archive detected".to_string(),
+        });
+    }
+    // WinRAR SFX
+    if buf_contains(buffer, b"WinRAR") && (buf_contains(buffer, b"SFX") || buf_contains(buffer, b"self-extracting")) {
+        return Some(PackerInfo {
+            name: "WinRAR SFX",
+            confidence: PackerConfidence::High,
+            details: "WinRAR self-extracting archive detected".to_string(),
+        });
+    }
     None
 }
 

@@ -9,6 +9,7 @@ eframe = "0.27"
 egui = "0.27"
 egui_extras = "0.27"
 rfd = "0.14"
+open = "5"
 iced-x86 = { version = "1", default-features = false, features = ["std", "decoder", "intel", "instr_info"] }
 
 [profile.release]

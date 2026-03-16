@@ -153,6 +153,7 @@ impl eframe::App for SixEyesApp {
                     let tabs = [
                         (Tab::Overview,   "Overview"),
                         (Tab::Imports,    "Imports"),
+                        (Tab::Exports,    "Exports"),
                         (Tab::Strings,    "Strings"),
                         (Tab::Heuristics, "Heuristics"),
                         (Tab::HexView,    "Hex"),
@@ -212,6 +213,7 @@ impl eframe::App for SixEyesApp {
                     Some(pe) => match self.active_tab {
                         Tab::Overview   => overview::render_overview(ui, pe, self.threat_score),
                         Tab::Imports    => imports::render_imports(ui, pe),
+                        Tab::Exports    => exports::render_exports(ui, pe),
                         Tab::Strings    => {
                             if let Some(disasm_idx) = strings::render_strings(ui, pe, &mut self.string_filter, &mut self.string_kind_filter) {
                                 self.active_tab = Tab::Disasm;
