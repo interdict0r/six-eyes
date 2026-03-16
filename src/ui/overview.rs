@@ -112,7 +112,10 @@ pub fn render_overview(ui: &mut Ui, pe: &PeInfo, score: u8) {
                     ui.end_row();
                 }
                 if let Some(ref cert) = pe.certificate {
-                    kv(ui, "Certificate", &format!("{} ({} bytes at 0x{:X})", cert.type_label, cert.size, cert.offset));
+                    kv(ui, "Certificate", &format!(
+                        "{} ({} bytes at 0x{:X}, revision 0x{:04X}, type 0x{:04X})",
+                        cert.type_label, cert.size, cert.offset, cert.revision, cert.cert_type
+                    ));
                 }
                 if let Some(go) = &pe.go_info {
                     kv(ui, "Go Version", &go.version_hint);
