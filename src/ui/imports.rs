@@ -1,9 +1,9 @@
 use eframe::egui::{self, Color32, RichText, Ui, Stroke};
 use crate::model::*;
-use crate::heuristics::{detect_capabilities, suspicious_import_color};
+use crate::heuristics::{MatchedCapability, suspicious_import_color};
 use super::*;
 
-pub fn render_imports(ui: &mut Ui, pe: &PeInfo) {
+pub fn render_imports(ui: &mut Ui, pe: &PeInfo, caps: &[MatchedCapability]) {
     if pe.imports.is_empty() {
         ui.centered_and_justified(|ui| {
             ui.label(RichText::new("No imports found — binary may be packed or use manual IAT.").weak().size(14.0));
@@ -11,7 +11,6 @@ pub fn render_imports(ui: &mut Ui, pe: &PeInfo) {
         return;
     }
 
-    let caps = detect_capabilities(pe);
     let total: usize = pe.imports.iter().map(|i| i.functions.len()).sum();
 
     egui::ScrollArea::vertical()
@@ -26,7 +25,7 @@ pub fn render_imports(ui: &mut Ui, pe: &PeInfo) {
 
         if !caps.is_empty() {
             section_header(ui, "Detected Capabilities");
-            for cap in &caps {
+            for cap in caps {
                 let (c, icon) = match cap.threat {
                     2 => (Color32::from_rgb(220,60,60), "!!"),
                     1 => (Color32::from_rgb(220,170,40), "!"),

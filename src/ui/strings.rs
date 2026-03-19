@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use eframe::egui::{self, Color32, RichText, Ui};
 use egui_extras::{TableBuilder, Column};
 use crate::model::*;
@@ -78,7 +79,7 @@ pub fn render_strings(ui: &mut Ui, pe: &PeInfo, filter: &mut String, kind_filter
     nav_target
 }
 
-fn string_table(ui: &mut Ui, strings: &[&ExtractedString], xrefs: &std::collections::HashMap<u32, Vec<usize>>) -> Option<usize> {
+fn string_table(ui: &mut Ui, strings: &[&ExtractedString], xrefs: &HashMap<u32, Vec<usize>>) -> Option<usize> {
     let available = ui.available_height().max(200.0);
     let mut nav_target: Option<usize> = None;
 

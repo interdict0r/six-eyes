@@ -1,7 +1,7 @@
 use eframe::egui::{self, Color32, RichText, Vec2, Rect, Stroke};
 use crate::model::*;
 use crate::parser::parse_pe;
-use crate::heuristics::build_heuristic_flags;
+use crate::heuristics::{build_heuristic_flags, detect_capabilities, MatchedCapability};
 use crate::ui::*;
 
 pub struct SixEyesApp {
@@ -11,6 +11,7 @@ pub struct SixEyesApp {
     pub string_filter:            String,
     pub string_kind_filter:       StringKindFilter,
     pub heuristic_flags:          Vec<crate::heuristics::HeuristicFlag>,
+    pub capabilities:             Vec<MatchedCapability>,
     pub threat_score:             u8,
     pub disasm_goto:              String,
     pub disasm_search:            String,
@@ -21,6 +22,7 @@ pub struct SixEyesApp {
     pub tab_anim:                 f32,
     pub tab_underline_x:          f32,
     pub tab_underline_w:          f32,
+    style_initialized:            bool,
 }
 
 impl Default for SixEyesApp {
@@ -32,6 +34,7 @@ impl Default for SixEyesApp {
             string_filter: String::new(),
             string_kind_filter: StringKindFilter::All,
             heuristic_flags: Vec::new(),
+            capabilities: Vec::new(),
             threat_score: 0,
             disasm_goto: String::new(),
             disasm_search: String::new(),
@@ -42,6 +45,7 @@ impl Default for SixEyesApp {
             tab_anim: 1.0,
             tab_underline_x: 0.0,
             tab_underline_w: 0.0,
+            style_initialized: false,
         }
     }
 }
@@ -50,6 +54,7 @@ impl SixEyesApp {
     fn load(&mut self, pe: PeInfo) {
         drop(self.pe.take());
         self.heuristic_flags = build_heuristic_flags(&pe);
+        self.capabilities    = detect_capabilities(&pe);
         self.threat_score    = compute_threat_score(&self.heuristic_flags);
         self.pe                 = Some(pe);
         self.active_tab         = Tab::Overview;
@@ -81,22 +86,24 @@ fn compute_threat_score(flags: &[crate::heuristics::HeuristicFlag]) -> u8 {
 
 impl eframe::App for SixEyesApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        ctx.set_visuals(egui::Visuals::dark());
-
-        let mut style = (*ctx.style()).clone();
-        style.interaction.selectable_labels = false;
-        style.spacing.scroll = egui::style::ScrollStyle::solid();
-        style.spacing.scroll.bar_outer_margin = 0.0;
-        style.spacing.scroll.bar_inner_margin = 2.0;
-        style.spacing.scroll.bar_width = 8.0;
-        style.visuals.widgets.noninteractive.rounding = egui::Rounding::ZERO;
-        style.visuals.widgets.inactive.rounding = egui::Rounding::ZERO;
-        style.visuals.widgets.hovered.rounding = egui::Rounding::ZERO;
-        style.visuals.widgets.active.rounding = egui::Rounding::ZERO;
-        style.visuals.widgets.open.rounding = egui::Rounding::ZERO;
-        style.visuals.window_rounding = egui::Rounding::ZERO;
-        style.visuals.menu_rounding = egui::Rounding::ZERO;
-        ctx.set_style(style);
+        if !self.style_initialized {
+            self.style_initialized = true;
+            ctx.set_visuals(egui::Visuals::dark());
+            let mut style = (*ctx.style()).clone();
+            style.interaction.selectable_labels = false;
+            style.spacing.scroll = egui::style::ScrollStyle::solid();
+            style.spacing.scroll.bar_outer_margin = 0.0;
+            style.spacing.scroll.bar_inner_margin = 2.0;
+            style.spacing.scroll.bar_width = 8.0;
+            style.visuals.widgets.noninteractive.rounding = egui::Rounding::ZERO;
+            style.visuals.widgets.inactive.rounding = egui::Rounding::ZERO;
+            style.visuals.widgets.hovered.rounding = egui::Rounding::ZERO;
+            style.visuals.widgets.active.rounding = egui::Rounding::ZERO;
+            style.visuals.widgets.open.rounding = egui::Rounding::ZERO;
+            style.visuals.window_rounding = egui::Rounding::ZERO;
+            style.visuals.menu_rounding = egui::Rounding::ZERO;
+            ctx.set_style(style);
+        }
 
         if self.last_tab != self.active_tab {
             self.tab_anim = 0.0;
@@ -212,7 +219,7 @@ impl eframe::App for SixEyesApp {
                     }
                     Some(pe) => match self.active_tab {
                         Tab::Overview   => overview::render_overview(ui, pe, self.threat_score),
-                        Tab::Imports    => imports::render_imports(ui, pe),
+                        Tab::Imports    => imports::render_imports(ui, pe, &self.capabilities),
                         Tab::Exports    => exports::render_exports(ui, pe),
                         Tab::Strings    => {
                             if let Some(disasm_idx) = strings::render_strings(ui, pe, &mut self.string_filter, &mut self.string_kind_filter) {

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use exe::pe::*;
 use iced_x86::{Decoder, DecoderOptions, FlowControl, Formatter, IntelFormatter, Instruction};
@@ -67,7 +67,7 @@ pub fn parse_pe(path: &str) -> PeInfo {
                 .unwrap_or("????????").trim_end_matches('\0').to_string();
 
             let data  = section.read(&pe).unwrap_or(&[]);
-            let ent   = shannon_entropy_bytes(data);
+            let ent   = shannon_entropy(data);
             let start = section.virtual_address.0;
             let end   = start + section.virtual_size;
             let is_ep = info.entry_point >= start && info.entry_point < end;
@@ -136,24 +136,21 @@ pub fn parse_pe(path: &str) -> PeInfo {
 }
 
 #[inline(always)]
+unsafe fn read_u16_le(buf: &[u8], offset: usize) -> u16 {
+    u16::from_le_bytes([buf[offset], buf[offset + 1]])
+}
+
+#[inline(always)]
 unsafe fn read_u32_le(buf: &[u8], offset: usize) -> u32 {
-    unsafe {
-        u32::from_le(std::ptr::read_unaligned(buf.as_ptr().add(offset) as *const u32))
-    }
+    u32::from_le_bytes([buf[offset], buf[offset + 1], buf[offset + 2], buf[offset + 3]])
 }
 
 #[inline(always)]
 unsafe fn read_u64_le(buf: &[u8], offset: usize) -> u64 {
-    unsafe {
-        u64::from_le(std::ptr::read_unaligned(buf.as_ptr().add(offset) as *const u64))
-    }
-}
-
-#[inline(always)]
-unsafe fn read_u16_le(buf: &[u8], offset: usize) -> u16 {
-    unsafe {
-        u16::from_le(std::ptr::read_unaligned(buf.as_ptr().add(offset) as *const u16))
-    }
+    u64::from_le_bytes([
+        buf[offset], buf[offset + 1], buf[offset + 2], buf[offset + 3],
+        buf[offset + 4], buf[offset + 5], buf[offset + 6], buf[offset + 7],
+    ])
 }
 
 fn compute_imphash(imports: &[ImportInfo]) -> String {
@@ -170,8 +167,8 @@ fn compute_imphash(imports: &[ImportInfo]) -> String {
         };
         for f in &imp.functions {
             if !first { buf.push(b','); }
-            for i in 0..dll_end {
-                buf.push(unsafe { *dll_bytes.get_unchecked(i) }.to_ascii_lowercase());
+            for &b in &dll_bytes[..dll_end] {
+                buf.push(b.to_ascii_lowercase());
             }
             buf.push(b'.');
             for &b in f.as_bytes() {
@@ -254,14 +251,14 @@ fn compute_block_entropy(buffer: &[u8], block_size: usize) -> Vec<f32> {
     let mut offset = 0usize;
     while offset < buffer.len() {
         let end = (offset + block_size).min(buffer.len());
-        result.push(shannon_entropy_bytes(&buffer[offset..end]));
+        result.push(shannon_entropy(&buffer[offset..end]));
         offset = end;
     }
     result
 }
 
-fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8]) -> (Vec<DisasmLine>, DisasmMeta, std::collections::HashMap<u32, Vec<usize>>) {
-    let empty = || (Vec::new(), DisasmMeta { calls: 0u16, jumps: 0u16, rets: 0u16, nops: 0u16, func_starts: Vec::new(), user_code: None, arcs: Vec::new(), ip_to_idx: std::collections::HashMap::new() }, std::collections::HashMap::new());
+fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8]) -> (Vec<DisasmLine>, DisasmMeta, HashMap<u32, Vec<usize>>) {
+    let empty = || (Vec::new(), DisasmMeta { calls: 0u16, jumps: 0u16, rets: 0u16, nops: 0u16, func_starts: Vec::new(), user_code: None, arcs: Vec::new(), ip_to_idx: HashMap::new() }, HashMap::new());
     if buffer.is_empty() { return empty(); }
 
     let ep_off = match find_ep_file_offset(pe) {
@@ -282,16 +279,16 @@ fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8]) -> (Vec<DisasmLine>, DisasmM
 
     let mut formatter = IntelFormatter::new();
     let mut output = String::new();
-    let lut = HEX_LUT.as_ptr();
+    let lut = HEX_LUT;
     let mut lines = Vec::with_capacity(instructions.len());
 
-    let mut meta = DisasmMeta { calls: 0u16, jumps: 0u16, rets: 0u16, nops: 0u16, func_starts: Vec::new(), user_code: None, arcs: Vec::new(), ip_to_idx: std::collections::HashMap::new() };
+    let mut meta = DisasmMeta { calls: 0u16, jumps: 0u16, rets: 0u16, nops: 0u16, func_starts: Vec::new(), user_code: None, arcs: Vec::new(), ip_to_idx: HashMap::new() };
 
     let first_ip = instructions[0].ip();
     let last_ip  = instructions.last().map(|i| i.ip()).unwrap_or(first_ip);
 
     let (string_va_map, va_to_str_offset) = build_string_va_map(pe);
-    let mut string_xrefs: std::collections::HashMap<u32, Vec<usize>> = std::collections::HashMap::new();
+    let mut string_xrefs: HashMap<u32, Vec<usize>> = HashMap::new();
 
     for (idx, instr) in instructions.iter().enumerate() {
         output.clear();
@@ -306,16 +303,13 @@ fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8]) -> (Vec<DisasmLine>, DisasmM
         let hex_bytes = if let Some(foff) = rva_to_file_offset_sections(pe, rva) {
             let end = (foff + instr_len).min(buffer.len());
             let mut buf = Vec::with_capacity(instr_len * 3);
-            let ptr = buffer.as_ptr();
-            for j in foff..end {
-                let b = unsafe { *ptr.add(j) } as usize;
-                let li = b * 2;
-                unsafe {
-                    buf.push(*lut.add(li));
-                    buf.push(*lut.add(li + 1));
-                }
+            for &byte in &buffer[foff..end] {
+                let li = byte as usize * 2;
+                buf.push(lut[li]);
+                buf.push(lut[li + 1]);
                 buf.push(b' ');
             }
+            // buf contains only ASCII hex digits and spaces
             unsafe { String::from_utf8_unchecked(buf) }
         } else {
             String::new()
@@ -375,7 +369,7 @@ fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8]) -> (Vec<DisasmLine>, DisasmM
         });
     }
 
-    meta.ip_to_idx = std::collections::HashMap::with_capacity(lines.len());
+    meta.ip_to_idx = HashMap::with_capacity(lines.len());
     for (i, l) in lines.iter().enumerate() {
         meta.ip_to_idx.insert(l.ip, i);
     }
@@ -442,14 +436,14 @@ fn split_opcode_operands(text: &str) -> (&str, &str) {
     }
 }
 
-fn build_string_va_map(pe: &PeInfo) -> (std::collections::HashMap<u64, String>, std::collections::HashMap<u64, u32>) {
+fn build_string_va_map(pe: &PeInfo) -> (HashMap<u64, String>, HashMap<u64, u32>) {
     let mut sorted_secs: Vec<(u32, u32, u32)> = pe.sections.iter()
         .map(|s| (s.raw_offset, s.raw_size, s.virtual_addr))
         .collect();
     sorted_secs.sort_unstable_by_key(|e| e.0);
 
-    let mut map = std::collections::HashMap::new();
-    let mut va_to_offset = std::collections::HashMap::new();
+    let mut map = HashMap::new();
+    let mut va_to_offset = HashMap::new();
     for es in &pe.strings {
         let off = es.offset;
         let idx = sorted_secs.partition_point(|e| e.0 <= off);
@@ -471,8 +465,8 @@ fn build_string_va_map(pe: &PeInfo) -> (std::collections::HashMap<u64, String>, 
 
 fn build_comment(
     instr: &Instruction,
-    iat_map: &std::collections::HashMap<u64, String>,
-    string_map: &std::collections::HashMap<u64, String>,
+    iat_map: &HashMap<u64, String>,
+    string_map: &HashMap<u64, String>,
     target: Option<u64>,
     _bitness: u32,
 ) -> String {
@@ -879,8 +873,8 @@ fn parse_imports(pe: &VecPE, buffer: &[u8], is_64: bool) -> Vec<ImportInfo> {
     result
 }
 
-fn build_iat_map(pe: &VecPE, buffer: &[u8], is_64: bool, image_base: u64) -> std::collections::HashMap<u64, String> {
-    let mut map = std::collections::HashMap::new();
+fn build_iat_map(pe: &VecPE, buffer: &[u8], is_64: bool, image_base: u64) -> HashMap<u64, String> {
+    let mut map = HashMap::new();
 
     let (import_rva, import_size) = match pe.get_data_directory(exe::ImageDirectoryEntry::Import) {
         Ok(dd) => (dd.virtual_address.0, dd.size),
@@ -1005,13 +999,7 @@ fn rva_to_offset(pe: &VecPE, rva: u32) -> Option<usize> {
 fn read_cstring(data: &[u8], offset: usize) -> String {
     if offset >= data.len() { return String::new(); }
     let slice = &data[offset..];
-    let len = unsafe {
-        let ptr = slice.as_ptr();
-        let end = ptr.add(slice.len());
-        let mut p = ptr;
-        while p < end && *p != 0 { p = p.add(1); }
-        p.offset_from(ptr) as usize
-    };
+    let len = slice.iter().position(|&b| b == 0).unwrap_or(slice.len());
     String::from_utf8_lossy(&slice[..len]).into_owned()
 }
 
@@ -1022,21 +1010,19 @@ fn extract_strings(data: &[u8], base_offset: usize, section: &str) -> Vec<Extrac
     let sec: Rc<str> = Rc::from(section);
 
     {
-        let ptr = data.as_ptr();
         let mut i = 0usize;
         let mut run_start = 0usize;
         let mut in_run = false;
 
         while i < len {
-            let b = unsafe { *ptr.add(i) };
+            let b = data[i];
             let printable = b.is_ascii_graphic() || b == b' ' || b == b'\t';
             if printable {
                 if !in_run { run_start = i; in_run = true; }
             } else if in_run {
                 let run_len = i - run_start;
                 if run_len >= MIN_LEN {
-                    let slice = unsafe { std::slice::from_raw_parts(ptr.add(run_start), run_len) };
-                    let value = String::from_utf8_lossy(slice).into_owned();
+                    let value = String::from_utf8_lossy(&data[run_start..i]).into_owned();
                     let kind = classify_string(&value);
                     results.push(ExtractedString { value, offset: (base_offset + run_start) as u32, kind, section: sec.clone() });
                 }
@@ -1060,8 +1046,8 @@ fn extract_strings(data: &[u8], base_offset: usize, section: &str) -> Vec<Extrac
         let aligned_end = len & !1;
 
         while i < aligned_end {
-            let lo = unsafe { *data.get_unchecked(i) };
-            let hi = unsafe { *data.get_unchecked(i + 1) };
+            let lo = data[i];
+            let hi = data[i + 1];
             let printable = hi == 0 && ((0x20..=0x7E).contains(&lo) || lo == 0x09);
             if printable {
                 if wstart.is_none() { wstart = Some(i); }
@@ -1091,12 +1077,9 @@ struct ByteStats {
 
 #[inline]
 fn byte_stats(s: &str) -> ByteStats {
-    let len = s.len();
-    let ptr = s.as_ptr();
     let (mut alpha, mut digits) = (0u16, 0u16);
     let mut all_numeric_like = true;
-    for i in 0..len {
-        let b = unsafe { *ptr.add(i) };
+    for &b in s.as_bytes() {
         if b.is_ascii_alphabetic() {
             alpha += 1;
             all_numeric_like = false;
@@ -1124,7 +1107,7 @@ fn classify_string(s: &str) -> StringKind {
     if total >= 32 && looks_like_hex_string(s) { return StringKind::Obfuscated; }
 
     let needs_entropy = (total >= 16 && looks_like_base64(s)) || total >= 20;
-    let ent = if needs_entropy { shannon_entropy_str(s) } else { 0.0 };
+    let ent = if needs_entropy { shannon_entropy(s.as_bytes()) as f64 } else { 0.0 };
 
     if total >= 16 && looks_like_base64(s) {
         if ent > 4.0 && stats.digits > 0 { return StringKind::Obfuscated; }
@@ -1145,12 +1128,9 @@ fn classify_string(s: &str) -> StringKind {
 
 #[inline]
 fn looks_like_version(s: &str) -> bool {
-    let len = s.len();
-    if len == 0 { return false; }
-    let ptr = s.as_ptr();
+    if s.is_empty() { return false; }
     let mut has_dot = false;
-    for i in 0..len {
-        let b = unsafe { *ptr.add(i) };
+    for &b in s.as_bytes() {
         if b == b'.' { has_dot = true; }
         else if !b.is_ascii_digit() { return false; }
     }
@@ -1159,27 +1139,19 @@ fn looks_like_version(s: &str) -> bool {
 
 #[inline]
 fn looks_like_path(s: &str) -> bool {
-    let len = s.len();
-    if len == 0 { return false; }
-    let ptr = s.as_ptr();
-    if unsafe { *ptr } == b'.' { return true; }
-    for i in 0..len {
-        let b = unsafe { *ptr.add(i) };
-        if b == b'\\' || b == b'/' { return true; }
-    }
-    false
+    let bytes = s.as_bytes();
+    if bytes.is_empty() { return false; }
+    if bytes[0] == b'.' { return true; }
+    bytes.iter().any(|&b| b == b'\\' || b == b'/')
 }
 
 #[inline]
 fn is_camel_or_pascal_case(s: &str) -> bool {
-    let len = s.len();
-    if len < 4 { return false; }
-    let ptr = s.as_ptr();
-    let first = unsafe { *ptr };
-    if !first.is_ascii_uppercase() { return false; }
+    let bytes = s.as_bytes();
+    if bytes.len() < 4 { return false; }
+    if !bytes[0].is_ascii_uppercase() { return false; }
     let (mut uppers, mut has_lower) = (1u16, false);
-    for i in 1..len {
-        let b = unsafe { *ptr.add(i) };
+    for &b in &bytes[1..] {
         if b.is_ascii_uppercase() { uppers += 1; }
         else if b.is_ascii_lowercase() { has_lower = true; }
         else if !b.is_ascii_digit() && b != b'_' { return false; }
@@ -1208,25 +1180,16 @@ fn looks_like_known_identifier(s: &str) -> bool {
 #[inline]
 fn starts_with_ignore_ascii_case(haystack: &[u8], needle: &[u8]) -> bool {
     if haystack.len() < needle.len() { return false; }
-    let ptr_h = haystack.as_ptr();
-    let ptr_n = needle.as_ptr();
-    for i in 0..needle.len() {
-        let h = unsafe { (*ptr_h.add(i)).to_ascii_uppercase() };
-        let n = unsafe { *ptr_n.add(i) };
-        if h != n { return false; }
-    }
-    true
+    haystack[..needle.len()].iter().zip(needle).all(|(h, n)| h.to_ascii_uppercase() == *n)
 }
 
 
 #[inline]
 fn looks_like_base64(s: &str) -> bool {
-    let len = s.len();
-    if len < 16 || !len.is_multiple_of(4) { return false; }
-    let ptr = s.as_ptr();
+    let bytes = s.as_bytes();
+    if bytes.len() < 16 || !bytes.len().is_multiple_of(4) { return false; }
     let (mut eq, mut has_upper, mut has_lower, mut has_digit) = (0u8, false, false, false);
-    for i in 0..len {
-        let b = unsafe { *ptr.add(i) };
+    for &b in bytes {
         if b.is_ascii_uppercase()      { has_upper = true; }
         else if b.is_ascii_lowercase() { has_lower = true; }
         else if b.is_ascii_digit()     { has_digit = true; }
@@ -1238,12 +1201,10 @@ fn looks_like_base64(s: &str) -> bool {
 
 #[inline]
 fn looks_like_hex_string(s: &str) -> bool {
-    let len = s.len();
-    if len < 32 { return false; }
-    let ptr = s.as_ptr();
+    let bytes = s.as_bytes();
+    if bytes.len() < 32 { return false; }
     let mut has_alpha = false;
-    for i in 0..len {
-        let b = unsafe { *ptr.add(i) };
+    for &b in bytes {
         if !b.is_ascii_hexdigit() { return false; }
         if b.is_ascii_alphabetic() { has_alpha = true; }
     }
@@ -1252,74 +1213,36 @@ fn looks_like_hex_string(s: &str) -> bool {
 
 #[inline]
 fn looks_like_url_encoded(s: &str) -> bool {
-    let len = s.len();
-    let ptr = s.as_ptr();
-    let mut pct = 0u16;
-    for i in 0..len {
-        if unsafe { *ptr.add(i) } == b'%' { pct += 1; }
-    }
-    pct >= 3 && (pct as usize) * 3 <= len
+    let bytes = s.as_bytes();
+    let pct = bytes.iter().filter(|&&b| b == b'%').count();
+    pct >= 3 && pct * 3 <= bytes.len()
 }
 
 #[inline]
 fn looks_like_xor_artifact(s: &str) -> bool {
-    let len = s.len();
-    if len < 8 { return false; }
-    let ptr = s.as_ptr();
-    let first = unsafe { *ptr };
-    let mut first_count = 0u16;
-    for i in 0..len {
-        if unsafe { *ptr.add(i) } == first { first_count += 1; }
-    }
-    if first_count as usize * 100 / len > 80 { return true; }
-    let p0 = unsafe { *ptr };
-    let p1 = unsafe { *ptr.add(1) };
-    let pairs = len / 2;
-    let mut pair_matches = 0u16;
-    for i in (0..pairs * 2).step_by(2) {
-        if unsafe { *ptr.add(i) } == p0 && unsafe { *ptr.add(i + 1) } == p1 {
-            pair_matches += 1;
-        }
-    }
-    pair_matches as usize * 100 / pairs > 70
+    let bytes = s.as_bytes();
+    if bytes.len() < 8 { return false; }
+    let first = bytes[0];
+    let first_count = bytes.iter().filter(|&&b| b == first).count();
+    if first_count * 100 / bytes.len() > 80 { return true; }
+    let p0 = bytes[0];
+    let p1 = bytes[1];
+    let pairs = bytes.len() / 2;
+    let pair_matches = bytes.chunks_exact(2).filter(|c| c[0] == p0 && c[1] == p1).count();
+    pair_matches * 100 / pairs > 70
 }
 
 #[inline]
-fn shannon_entropy_str(s: &str) -> f64 {
-    let len = s.len();
-    if len == 0 { return 0.0; }
-    let mut freq = [0u32; 256];
-    let ptr = s.as_ptr();
-    for i in 0..len {
-        let b = unsafe { *ptr.add(i) };
-        unsafe { *freq.get_unchecked_mut(b as usize) += 1; }
-    }
-    let flen = len as f64;
-    let mut ent = 0.0f64;
-    for i in 0..256 {
-        let c = unsafe { *freq.get_unchecked(i) };
-        if c > 0 {
-            let p = c as f64 / flen;
-            ent -= p * p.log2();
-        }
-    }
-    ent
-}
-
-#[inline]
-fn shannon_entropy_bytes(data: &[u8]) -> f32 {
+fn shannon_entropy(data: &[u8]) -> f32 {
     let len = data.len();
     if len == 0 { return 0.0; }
     let mut freq = [0u32; 256];
-    let ptr = data.as_ptr();
-    for i in 0..len {
-        let b = unsafe { *ptr.add(i) };
-        unsafe { *freq.get_unchecked_mut(b as usize) += 1; }
+    for &b in data {
+        freq[b as usize] += 1;
     }
     let flen = len as f64;
     let mut ent = 0.0f64;
-    for i in 0..256 {
-        let c = unsafe { *freq.get_unchecked(i) };
+    for &c in &freq {
         if c > 0 {
             let p = c as f64 / flen;
             ent -= p * p.log2();

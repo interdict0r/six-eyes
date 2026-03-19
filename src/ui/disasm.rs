@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Stroke, Ui};
 use crate::model::*;
 
@@ -218,8 +219,8 @@ pub fn render_disasm(
         let mut arc_gutter_left_x: f32 = 0.0;
         let mut arc_gutter_right_x: f32 = 0.0;
 
-        let mut arc_endpoints: std::collections::HashMap<usize, (bool, bool, Color32)> =
-            std::collections::HashMap::new();
+        let mut arc_endpoints: HashMap<usize, (bool, bool, Color32)> =
+            HashMap::new();
         if let Some(m) = meta {
             if !search_active && s_show_arcs {
                 for arc in &m.arcs {
@@ -342,7 +343,7 @@ pub fn render_disasm(
             if !search_active && s_show_arcs {
                 let vis_lo = row_range.start;
                 let vis_hi = row_range.end.saturating_sub(1);
-                let mut idx_to_y: std::collections::HashMap<usize, f32> = std::collections::HashMap::with_capacity(row_ys.len());
+                let mut idx_to_y: HashMap<usize, f32> = HashMap::with_capacity(row_ys.len());
                 for &(idx, cy) in &row_ys {
                     idx_to_y.insert(idx, cy);
                 }

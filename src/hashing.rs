@@ -18,15 +18,14 @@ f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff";
 
 #[inline]
 pub(crate) fn bytes_to_hex(bytes: &[u8]) -> String {
+    let lut = HEX_LUT;
     let mut buf = Vec::with_capacity(bytes.len() * 2);
-    let lut = HEX_LUT.as_ptr();
     for &b in bytes {
         let idx = (b as usize) * 2;
-        unsafe {
-            buf.push(*lut.add(idx));
-            buf.push(*lut.add(idx + 1));
-        }
+        buf.push(lut[idx]);
+        buf.push(lut[idx + 1]);
     }
+    // buf contains only ASCII hex characters — always valid UTF-8
     unsafe { String::from_utf8_unchecked(buf) }
 }
 
@@ -57,11 +56,9 @@ fn md5_compress(chunk: &[u8], state: &mut [u32; 4]) {
     ];
 
     let mut m = [0u32; 16];
-    let base = chunk.as_ptr();
     for (i, slot) in m.iter_mut().enumerate() {
-        *slot = unsafe {
-            u32::from_le(std::ptr::read_unaligned(base.add(i * 4) as *const u32))
-        };
+        let o = i * 4;
+        *slot = u32::from_le_bytes([chunk[o], chunk[o + 1], chunk[o + 2], chunk[o + 3]]);
     }
 
     let (mut a, mut b, mut c, mut d) = (state[0], state[1], state[2], state[3]);
@@ -139,11 +136,9 @@ fn sha256_compress(chunk: &[u8], h: &mut [u32; 8]) {
     ];
 
     let mut w = [0u32; 64];
-    let base = chunk.as_ptr();
     for (i, slot) in w[..16].iter_mut().enumerate() {
-        *slot = unsafe {
-            u32::from_be(std::ptr::read_unaligned(base.add(i * 4) as *const u32))
-        };
+        let o = i * 4;
+        *slot = u32::from_be_bytes([chunk[o], chunk[o + 1], chunk[o + 2], chunk[o + 3]]);
     }
     for i in 16..64 {
         let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
@@ -205,21 +200,17 @@ pub fn sha256_hex(data: &[u8]) -> String {
 
 pub fn calculate_checksum(data: &[u8]) -> u32 {
     let len = data.len();
-    let word_count = len / 2;
     let mut cs: u64 = 0;
 
-    unsafe {
-        let ptr = data.as_ptr();
-        for i in 0..word_count {
-            let w = u16::from_le(std::ptr::read_unaligned(ptr.add(i * 2) as *const u16)) as u64;
-            cs = (cs & 0xFFFF_FFFF) + w;
-            if cs > 0x1_0000_0000 {
-                cs = (cs & 0xFFFF_FFFF) + (cs >> 32);
-            }
+    for pair in data.chunks_exact(2) {
+        let w = u16::from_le_bytes([pair[0], pair[1]]) as u64;
+        cs = (cs & 0xFFFF_FFFF) + w;
+        if cs > 0x1_0000_0000 {
+            cs = (cs & 0xFFFF_FFFF) + (cs >> 32);
         }
-        if !len.is_multiple_of(2) {
-            cs += *ptr.add(len - 1) as u64;
-        }
+    }
+    if !len.is_multiple_of(2) {
+        cs += data[len - 1] as u64;
     }
 
     cs = (cs >> 16) + (cs & 0xFFFF);

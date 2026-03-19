@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::rc::Rc;
 use eframe::egui::Color32;
 
@@ -38,8 +39,8 @@ pub struct PeInfo {
     pub embedded:          Vec<EmbeddedArtifact>,
     pub disasm_lines:      Vec<DisasmLine>,
     pub disasm_meta:       Option<DisasmMeta>,
-    pub iat_map:           std::collections::HashMap<u64, String>,
-    pub string_xrefs:      std::collections::HashMap<u32, Vec<usize>>,
+    pub iat_map:           HashMap<u64, String>,
+    pub string_xrefs:      HashMap<u32, Vec<usize>>,
     pub relocations:       Option<RelocationInfo>,
     pub buffer:            Vec<u8>,
 }
@@ -97,7 +98,7 @@ pub struct DisasmMeta {
     pub func_starts: Vec<u16>,
     pub user_code:   Option<u16>,
     pub arcs:        Vec<BranchArc>,
-    pub ip_to_idx:   std::collections::HashMap<u64, usize>,
+    pub ip_to_idx:   HashMap<u64, usize>,
 }
 
 pub struct SectionInfo {

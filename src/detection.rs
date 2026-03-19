@@ -8,23 +8,23 @@ pub struct RichHeaderInfo {
     pub entries: Vec<(u16, u16, u32)>,
 }
 
+fn read_u32_le_at(data: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]])
+}
+
 pub fn parse_rich_header(data: &[u8]) -> Option<RichHeaderInfo> {
     let pos = data.windows(4).position(|w| w == b"Rich")?;
     if pos + 8 > data.len() { return None; }
-    let base = data.as_ptr();
-    let key = unsafe { std::ptr::read_unaligned(base.add(pos + 4) as *const u32) };
-    let key = u32::from_le(key);
+    let key = read_u32_le_at(data, pos + 4);
     let dans_enc = key ^ 0x536E6144;
+    let dans_enc_bytes = dans_enc.to_le_bytes();
     let start = data[..pos].windows(4)
-        .rposition(|w| {
-            let val = unsafe { std::ptr::read_unaligned(w.as_ptr() as *const u32) };
-            u32::from_le(val) == dans_enc
-        })?;
+        .rposition(|w| w == dans_enc_bytes)?;
     let mut entries: Vec<(u16, u16, u32)> = Vec::new();
     let mut i = start + 16;
     while i + 8 <= pos {
-        let dw1 = unsafe { u32::from_le(std::ptr::read_unaligned(base.add(i) as *const u32)) } ^ key;
-        let dw2 = unsafe { u32::from_le(std::ptr::read_unaligned(base.add(i + 4) as *const u32)) } ^ key;
+        let dw1 = read_u32_le_at(data, i) ^ key;
+        let dw2 = read_u32_le_at(data, i + 4) ^ key;
         entries.push(((dw1 >> 16) as u16, (dw1 & 0xFFFF) as u16, dw2));
         i += 8;
     }
@@ -137,58 +137,46 @@ pub fn detect_language(pe: &PeInfo, buffer: &[u8]) -> Option<String> {
 }
 
 fn validate_pclntab(buffer: &[u8]) -> bool {
-    const MAGICS: [u32; 4] = [
-        u32::from_le_bytes([0xFB, 0xFF, 0xFF, 0xFF]),
-        u32::from_le_bytes([0xFA, 0xFF, 0xFF, 0xFF]),
-        u32::from_le_bytes([0xF0, 0xFF, 0xFF, 0xFF]),
-        u32::from_le_bytes([0xF1, 0xFF, 0xFF, 0xFF]),
+    const MAGICS: [[u8; 4]; 4] = [
+        [0xFB, 0xFF, 0xFF, 0xFF],
+        [0xFA, 0xFF, 0xFF, 0xFF],
+        [0xF0, 0xFF, 0xFF, 0xFF],
+        [0xF1, 0xFF, 0xFF, 0xFF],
     ];
     if buffer.len() < 8 { return false; }
-    let base = buffer.as_ptr();
-    let end = buffer.len() - 7;
-    for &magic in &MAGICS {
-        let mut pos = 0;
-        while pos < end {
-            // SAFETY: pos + 7 < buffer.len(), guaranteed by end bound
-            let word = unsafe { std::ptr::read_unaligned(base.add(pos) as *const u32) };
-            if word == magic {
-                let ptr = unsafe { base.add(pos) };
-                let pad_ok   = unsafe { *ptr.add(4) == 0 && *ptr.add(5) == 0 };
-                let quantum  = unsafe { *ptr.add(6) };
-                let ptr_size = unsafe { *ptr.add(7) };
-                if pad_ok && matches!(quantum, 1 | 2 | 4) && matches!(ptr_size, 4 | 8) {
-                    return true;
-                }
+    for magic in &MAGICS {
+        for window in buffer.windows(8) {
+            if &window[..4] == magic
+                && window[4] == 0 && window[5] == 0
+                && matches!(window[6], 1 | 2 | 4)
+                && matches!(window[7], 4 | 8)
+            {
+                return true;
             }
-            pos += 1;
         }
     }
     false
 }
 
 pub fn parse_go_pclntab(buffer: &[u8]) -> Option<GoInfo> {
-    let magic_versions: &[(u32, &str)] = &[
-        (u32::from_le_bytes([0xF1, 0xFF, 0xFF, 0xFF]), "Go 1.20+"),
-        (u32::from_le_bytes([0xF0, 0xFF, 0xFF, 0xFF]), "Go 1.18-1.19"),
-        (u32::from_le_bytes([0xFA, 0xFF, 0xFF, 0xFF]), "Go 1.16-1.17"),
-        (u32::from_le_bytes([0xFB, 0xFF, 0xFF, 0xFF]), "Go 1.2-1.15"),
+    let magic_versions: &[([u8; 4], &str)] = &[
+        ([0xF1, 0xFF, 0xFF, 0xFF], "Go 1.20+"),
+        ([0xF0, 0xFF, 0xFF, 0xFF], "Go 1.18-1.19"),
+        ([0xFA, 0xFF, 0xFF, 0xFF], "Go 1.16-1.17"),
+        ([0xFB, 0xFF, 0xFF, 0xFF], "Go 1.2-1.15"),
     ];
 
-    let buf_len = buffer.len();
-    if buf_len < 8 { return None; }
-    let base = buffer.as_ptr();
+    if buffer.len() < 8 { return None; }
 
-    for &(magic, version_hint) in magic_versions {
+    for (magic, version_hint) in magic_versions {
         let mut pos = 0usize;
-        let search_end = buf_len - 7;
+        let search_end = buffer.len() - 7;
         while pos < search_end {
-            let word = unsafe { std::ptr::read_unaligned(base.add(pos) as *const u32) };
-            if word != magic { pos += 1; continue; }
+            if buffer[pos..pos + 4] != *magic { pos += 1; continue; }
 
-            let hdr = unsafe { base.add(pos) };
-            if unsafe { *hdr.add(4) != 0 || *hdr.add(5) != 0 } { pos += 4; continue; }
-            let quantum  = unsafe { *hdr.add(6) };
-            let ptr_size = unsafe { *hdr.add(7) };
+            if buffer[pos + 4] != 0 || buffer[pos + 5] != 0 { pos += 4; continue; }
+            let quantum  = buffer[pos + 6];
+            let ptr_size = buffer[pos + 7];
             if !matches!(quantum, 1 | 2 | 4) || !matches!(ptr_size, 4 | 8) { pos += 4; continue; }
 
             let mut functions = Vec::new();
@@ -196,19 +184,16 @@ pub fn parse_go_pclntab(buffer: &[u8]) -> Option<GoInfo> {
             let mut seen = HashSet::new();
 
             let mut i = pos;
-            while i < buf_len {
-                let b = unsafe { *base.add(i) };
+            while i < buffer.len() {
+                let b = buffer[i];
                 if b == 0 { i += 1; continue; }
                 let str_start = i;
-                while i < buf_len {
-                    let c = unsafe { *base.add(i) };
-                    if !(0x20..=0x7E).contains(&c) { break; }
+                while i < buffer.len() && (0x20..=0x7E).contains(&buffer[i]) {
                     i += 1;
                 }
                 let slen = i - str_start;
                 if slen >= 4 {
-                    let slice = unsafe { std::slice::from_raw_parts(base.add(str_start), slen) };
-                    if let Ok(s) = std::str::from_utf8(slice) {
+                    if let Ok(s) = std::str::from_utf8(&buffer[str_start..i]) {
                         if s.contains('.') && !s.contains(' ') && s.len() < 200 {
                             if (s.contains('/') || s.starts_with("main.") || s.starts_with("runtime."))
                                 && s.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'/' | b'_' | b'-' | b'*' | b'(' | b')'))
@@ -229,9 +214,9 @@ pub fn parse_go_pclntab(buffer: &[u8]) -> Option<GoInfo> {
             }
 
             if !functions.is_empty() || !source_files.is_empty() {
-                return Some(GoInfo { version_hint: version_hint.into(), functions, source_files });
+                return Some(GoInfo { version_hint: version_hint.to_string(), functions, source_files });
             }
-            return Some(GoInfo { version_hint: version_hint.into(), functions: vec![], source_files: vec![] });
+            return Some(GoInfo { version_hint: version_hint.to_string(), functions: vec![], source_files: vec![] });
         }
     }
     None
@@ -647,24 +632,15 @@ pub fn scan_embedded_artifacts(buffer: &[u8], sections: &[SectionInfo]) -> Vec<E
     let len = buffer.len();
     if len < 64 { return results; }
 
-    let base = buffer.as_ptr();
-
     let mut pos = 4usize;
     while pos + 64 <= len && results.len() < 32 {
-        // Quick check for 'MZ' (0x5A4D LE)
-        let mz = unsafe { std::ptr::read_unaligned(base.add(pos) as *const u16) };
-        if mz == 0x5A4D {
-            // Validate: e_lfanew must point to a PE\0\0 signature within bounds
+        if buffer[pos] == 0x4D && buffer[pos + 1] == 0x5A {
             if pos + 0x3C + 4 <= len {
-                let e_lfanew = unsafe {
-                    u32::from_le(std::ptr::read_unaligned(base.add(pos + 0x3C) as *const u32))
-                } as usize;
+                let e_lfanew = read_u32_le_at(buffer, pos + 0x3C) as usize;
                 let pe_sig_off = pos + e_lfanew;
                 if (0x40..0x1000).contains(&e_lfanew) && pe_sig_off + 4 <= len {
-                    let pe_sig = unsafe {
-                        u32::from_le(std::ptr::read_unaligned(base.add(pe_sig_off) as *const u32))
-                    };
-                    if pe_sig == 0x0000_4550 { // "PE\0\0"
+                    let pe_sig = read_u32_le_at(buffer, pe_sig_off);
+                    if pe_sig == 0x0000_4550 {
                         let section_name = find_section_for_offset(sections, pos as u32);
                         let est_size = estimate_pe_size(buffer, pos);
                         results.push(EmbeddedArtifact {
@@ -689,16 +665,15 @@ pub fn scan_embedded_artifacts(buffer: &[u8], sections: &[SectionInfo]) -> Vec<E
         let sec_end = (sec_start + sec.raw_size as usize).min(len);
         if sec_start >= sec_end || sec_end - sec_start < 16 { continue; }
 
-        // Skip .text — GetPC / NOP patterns are common in compiler-generated code.
         let is_main_code = matches!(sec.name.trim(), ".text" | "CODE" | ".code");
 
         let mut i = sec_start;
         while i + 16 <= sec_end && results.len() < 32 {
-            let b = unsafe { *base.add(i) };
+            let b = buffer[i];
 
             if b == 0x90 {
                 let start = i;
-                while i < sec_end && unsafe { *base.add(i) } == 0x90 { i += 1; }
+                while i < sec_end && buffer[i] == 0x90 { i += 1; }
                 let run = i - start;
                 if run >= 32 {
                     results.push(EmbeddedArtifact {
@@ -711,30 +686,24 @@ pub fn scan_embedded_artifacts(buffer: &[u8], sections: &[SectionInfo]) -> Vec<E
                 continue;
             }
 
-            // fnstenv GetPC: D9 74 24 F4
-            if i + 4 <= sec_end && b == 0xD9 {
-                let b1 = unsafe { *base.add(i + 1) };
-                let b2 = unsafe { *base.add(i + 2) };
-                let b3 = unsafe { *base.add(i + 3) };
-                if b1 == 0x74 && b2 == 0x24 && b3 == 0xF4 {
-                    results.push(EmbeddedArtifact {
-                        kind: ArtifactKind::Shellcode,
-                        offset: i as u32,
-                        size: 4,
-                        detail: format!("fnstenv GetPC stub at 0x{i:X} in {}", sec.name),
-                    });
-                    i += 4;
-                    continue;
-                }
+            if i + 4 <= sec_end && b == 0xD9
+                && buffer[i + 1] == 0x74 && buffer[i + 2] == 0x24 && buffer[i + 3] == 0xF4
+            {
+                results.push(EmbeddedArtifact {
+                    kind: ArtifactKind::Shellcode,
+                    offset: i as u32,
+                    size: 4,
+                    detail: format!("fnstenv GetPC stub at 0x{i:X} in {}", sec.name),
+                });
+                i += 4;
+                continue;
             }
 
             if !is_main_code && i + 6 <= sec_end && b == 0xE8 {
-                let call_rel = unsafe {
-                    std::ptr::read_unaligned(base.add(i + 1) as *const u32)
-                };
+                let call_rel = read_u32_le_at(buffer, i + 1);
                 if call_rel == 0 {
-                    let pop = unsafe { *base.add(i + 5) };
-                    let prev = if i > sec_start { unsafe { *base.add(i - 1) } } else { 0 };
+                    let pop = buffer[i + 5];
+                    let prev = if i > sec_start { buffer[i - 1] } else { 0 };
                     if (0x58..=0x5F).contains(&pop) && prev != 0x60 {
                         results.push(EmbeddedArtifact {
                             kind: ArtifactKind::Shellcode,
@@ -758,29 +727,18 @@ pub fn scan_embedded_artifacts(buffer: &[u8], sections: &[SectionInfo]) -> Vec<E
 fn estimate_pe_size(buffer: &[u8], mz_offset: usize) -> u32 {
     let remaining = (buffer.len() - mz_offset) as u32;
     if mz_offset + 0x3C + 4 > buffer.len() { return 0; }
-    let base = buffer.as_ptr();
-    let e_lfanew = unsafe {
-        u32::from_le(std::ptr::read_unaligned(base.add(mz_offset + 0x3C) as *const u32))
-    } as usize;
+    let e_lfanew = read_u32_le_at(buffer, mz_offset + 0x3C) as usize;
     let pe_off = mz_offset + e_lfanew;
     if pe_off + 0x18 > buffer.len() { return 0; }
-    let num_sections = unsafe {
-        u16::from_le(std::ptr::read_unaligned(base.add(pe_off + 6) as *const u16))
-    } as usize;
-    let opt_hdr_size = unsafe {
-        u16::from_le(std::ptr::read_unaligned(base.add(pe_off + 0x14) as *const u16))
-    } as usize;
+    let num_sections = u16::from_le_bytes([buffer[pe_off + 6], buffer[pe_off + 7]]) as usize;
+    let opt_hdr_size = u16::from_le_bytes([buffer[pe_off + 0x14], buffer[pe_off + 0x15]]) as usize;
     let first_sec = pe_off + 0x18 + opt_hdr_size;
     let mut max_end: u32 = 0;
     for i in 0..num_sections.min(96) {
         let sh = first_sec + i * 40;
         if sh + 40 > buffer.len() { break; }
-        let raw_offset = unsafe {
-            u32::from_le(std::ptr::read_unaligned(base.add(sh + 20) as *const u32))
-        };
-        let raw_size = unsafe {
-            u32::from_le(std::ptr::read_unaligned(base.add(sh + 16) as *const u32))
-        };
+        let raw_offset = read_u32_le_at(buffer, sh + 20);
+        let raw_size = read_u32_le_at(buffer, sh + 16);
         let end = raw_offset.saturating_add(raw_size);
         if end > max_end { max_end = end; }
     }
