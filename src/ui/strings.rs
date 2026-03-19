@@ -15,13 +15,7 @@ fn ascii_contains_ci(haystack: &str, needle: &str) -> bool {
 pub fn render_strings(ui: &mut Ui, pe: &PeInfo, filter: &mut String, kind_filter: &mut StringKindFilter) -> Option<usize> {
     let fl = filter.to_ascii_lowercase();
     let visible: Vec<&ExtractedString> = pe.strings.iter().filter(|s| {
-        let ko = match kind_filter {
-            StringKindFilter::All        => true,
-            StringKindFilter::Ascii      => s.kind == StringKind::Ascii,
-            StringKindFilter::Wide       => s.kind == StringKind::Wide,
-            StringKindFilter::Obfuscated => s.kind == StringKind::Obfuscated,
-        };
-        ko && (fl.is_empty() || ascii_contains_ci(&s.value, &fl))
+        kind_filter.matches(s.kind) && (fl.is_empty() || ascii_contains_ci(&s.value, &fl))
     }).collect();
 
     let normal: Vec<&ExtractedString> = visible.iter().copied().filter(|s| s.kind != StringKind::Obfuscated).collect();

@@ -11,7 +11,7 @@ pub fn render_imports(ui: &mut Ui, pe: &PeInfo, caps: &[MatchedCapability]) {
         return;
     }
 
-    let total: usize = pe.imports.iter().map(|i| i.functions.len()).sum();
+    let total = pe.total_imports();
 
     egui::ScrollArea::vertical()
         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)

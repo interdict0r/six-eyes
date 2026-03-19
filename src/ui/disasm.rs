@@ -499,7 +499,7 @@ fn render_operands(
 ) {
     let tokens = tokenize_operands(operands);
 
-    let clickable_target = if matches!(line.kind, InstrKind::Call | InstrKind::Jump | InstrKind::CondJump) {
+    let clickable_target = if line.kind.is_branch() {
         line.target.filter(|&t| t >= first_ip && t <= last_ip)
     } else {
         None

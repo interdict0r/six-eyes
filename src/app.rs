@@ -1,6 +1,7 @@
 use eframe::egui::{self, Color32, RichText, Vec2, Rect, Stroke};
 use crate::model::*;
 use crate::parser::parse_pe;
+use std::collections::HashSet;
 use crate::heuristics::{build_heuristic_flags, detect_capabilities, MatchedCapability};
 use crate::ui::*;
 
@@ -53,8 +54,10 @@ impl Default for SixEyesApp {
 impl SixEyesApp {
     fn load(&mut self, pe: PeInfo) {
         drop(self.pe.take());
-        self.heuristic_flags = build_heuristic_flags(&pe);
-        self.capabilities    = detect_capabilities(&pe);
+        let import_fns: HashSet<&str> = pe.imports.iter()
+            .flat_map(|i| i.functions.iter().map(|s| s.as_str())).collect();
+        self.heuristic_flags = build_heuristic_flags(&pe, &import_fns);
+        self.capabilities    = detect_capabilities(&import_fns);
         self.threat_score    = compute_threat_score(&self.heuristic_flags);
         self.pe                 = Some(pe);
         self.active_tab         = Tab::Overview;

@@ -19,14 +19,13 @@ f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff";
 #[inline]
 pub(crate) fn bytes_to_hex(bytes: &[u8]) -> String {
     let lut = HEX_LUT;
-    let mut buf = Vec::with_capacity(bytes.len() * 2);
+    let mut s = String::with_capacity(bytes.len() * 2);
     for &b in bytes {
         let idx = (b as usize) * 2;
-        buf.push(lut[idx]);
-        buf.push(lut[idx + 1]);
+        s.push(lut[idx] as char);
+        s.push(lut[idx + 1] as char);
     }
-    // buf contains only ASCII hex characters — always valid UTF-8
-    unsafe { String::from_utf8_unchecked(buf) }
+    s
 }
 
 fn md5_compress(chunk: &[u8], state: &mut [u32; 4]) {

@@ -45,6 +45,18 @@ pub struct PeInfo {
     pub buffer:            Vec<u8>,
 }
 
+impl PeInfo {
+    #[inline]
+    pub fn total_imports(&self) -> usize {
+        self.imports.iter().map(|i| i.functions.len()).sum()
+    }
+
+    #[inline]
+    pub fn obfuscated_string_count(&self) -> usize {
+        self.strings.iter().filter(|s| s.kind == StringKind::Obfuscated).count()
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum InstrKind {
     Call,
@@ -69,6 +81,25 @@ impl InstrKind {
             Self::Other    => Color32::from_rgb(210, 210, 220),
         }
     }
+
+    #[inline]
+    pub fn is_branch(self) -> bool {
+        matches!(self, Self::Call | Self::Jump | Self::CondJump)
+    }
+}
+
+impl From<iced_x86::FlowControl> for InstrKind {
+    fn from(fc: iced_x86::FlowControl) -> Self {
+        use iced_x86::FlowControl;
+        match fc {
+            FlowControl::UnconditionalBranch | FlowControl::IndirectBranch => Self::Jump,
+            FlowControl::ConditionalBranch => Self::CondJump,
+            FlowControl::Call | FlowControl::IndirectCall => Self::Call,
+            FlowControl::Return => Self::Ret,
+            FlowControl::Interrupt => Self::Int,
+            _ => Self::Other,
+        }
+    }
 }
 
 pub struct DisasmLine {
@@ -90,6 +121,7 @@ pub struct BranchArc {
     pub col:  u8,
 }
 
+#[derive(Default)]
 pub struct DisasmMeta {
     pub calls:       u16,
     pub jumps:       u16,
@@ -290,3 +322,15 @@ pub enum Tab { #[default] Overview, Imports, Exports, Strings, Heuristics, HexVi
 
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
 pub enum StringKindFilter { #[default] All, Ascii, Wide, Obfuscated }
+
+impl StringKindFilter {
+    #[inline]
+    pub fn matches(self, kind: StringKind) -> bool {
+        match self {
+            Self::All        => true,
+            Self::Ascii      => kind == StringKind::Ascii,
+            Self::Wide       => kind == StringKind::Wide,
+            Self::Obfuscated => kind == StringKind::Obfuscated,
+        }
+    }
+}

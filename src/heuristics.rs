@@ -213,9 +213,7 @@ pub struct MatchedCapability {
     pub matched:     Vec<&'static str>,
 }
 
-pub fn detect_capabilities(pe: &PeInfo) -> Vec<MatchedCapability> {
-    let all_fns: HashSet<&str> = pe.imports.iter()
-        .flat_map(|i| i.functions.iter().map(|s| s.as_str())).collect();
+pub fn detect_capabilities(all_fns: &HashSet<&str>) -> Vec<MatchedCapability> {
     let mut caps = Vec::new();
     for def in CAPABILITIES {
         let matched: Vec<&'static str> = def.apis.iter()
@@ -258,7 +256,7 @@ impl Severity {
     }
 }
 
-pub fn build_heuristic_flags(pe: &PeInfo) -> Vec<HeuristicFlag> {
+pub fn build_heuristic_flags(pe: &PeInfo, all_fns: &HashSet<&str>) -> Vec<HeuristicFlag> {
     let mut flags = Vec::new();
     macro_rules! f {
         ($sev:expr, $cat:expr, $msg:expr) => {
@@ -291,7 +289,7 @@ pub fn build_heuristic_flags(pe: &PeInfo) -> Vec<HeuristicFlag> {
         }
     }
 
-    let obf_count = pe.strings.iter().filter(|s| s.kind == StringKind::Obfuscated).count();
+    let obf_count = pe.obfuscated_string_count();
     if obf_count > 20 {
         f!(Severity::Critical, "Packing/Obfuscation", format!("{obf_count} obfuscated strings detected"));
     } else if obf_count > 5 {
@@ -341,14 +339,12 @@ pub fn build_heuristic_flags(pe: &PeInfo) -> Vec<HeuristicFlag> {
         }
     }
 
-    let total_imports: usize = pe.imports.iter().map(|i| i.functions.len()).sum();
+    let total_imports = pe.total_imports();
     if pe.imports.is_empty() || total_imports == 0 {
         f!(Severity::Critical, "Imports", "No imports — likely runtime API resolution");
     } else if total_imports < 5 {
         f!(Severity::Warn, "Imports", format!("Only {total_imports} imports — possible stub/loader"));
     }
-
-    let all_fns: HashSet<&str> = pe.imports.iter().flat_map(|i| i.functions.iter().map(|s| s.as_str())).collect();
 
     for def in CAPABILITIES {
         let matched: Vec<&str> = def.apis.iter().copied().filter(|a| all_fns.contains(a)).collect();
@@ -372,16 +368,15 @@ pub fn build_heuristic_flags(pe: &PeInfo) -> Vec<HeuristicFlag> {
              mut has_amsi, mut has_onion) = (false, false, false, false, false, false, false, false, false, false);
 
         for s in pe.strings.iter().map(|s| s.value.as_str()) {
-            let l = s.to_ascii_lowercase();
-            if !has_run_key && (l.contains("currentversion\\run") || l.contains("currentversion/run")) { has_run_key = true; }
-            if !has_lsass && l.contains("lsass") { has_lsass = true; }
-            if !has_schtasks && (l.contains("schtasks") || (l.contains("/create") && l.contains("task"))) { has_schtasks = true; }
-            if !has_powershell && l.contains("powershell") && (l.contains("-enc") || l.contains("-encodedcommand") || l.contains("-nop")) { has_powershell = true; }
-            if !has_cmd && (l.contains("cmd.exe") || l.contains("cmd /c")) && l.len() > 6 { has_cmd = true; }
-            if !has_temp_path && (l.contains("%temp%") || l.contains("%appdata%") || l.contains("\\temp\\") || l.contains("/tmp/")) { has_temp_path = true; }
-            if !has_shadow_copy && (l.contains("vssadmin") || l.contains("shadowcopy")) { has_shadow_copy = true; }
+            if !has_run_key && (contains_ci(s, "currentversion\\run") || contains_ci(s, "currentversion/run")) { has_run_key = true; }
+            if !has_lsass && contains_ci(s, "lsass") { has_lsass = true; }
+            if !has_schtasks && (contains_ci(s, "schtasks") || (contains_ci(s, "/create") && contains_ci(s, "task"))) { has_schtasks = true; }
+            if !has_powershell && contains_ci(s, "powershell") && (contains_ci(s, "-enc") || contains_ci(s, "-encodedcommand") || contains_ci(s, "-nop")) { has_powershell = true; }
+            if !has_cmd && (contains_ci(s, "cmd.exe") || contains_ci(s, "cmd /c")) && s.len() > 6 { has_cmd = true; }
+            if !has_temp_path && (contains_ci(s, "%temp%") || contains_ci(s, "%appdata%") || s.contains("\\temp\\") || s.contains("/tmp/")) { has_temp_path = true; }
+            if !has_shadow_copy && (contains_ci(s, "vssadmin") || contains_ci(s, "shadowcopy")) { has_shadow_copy = true; }
             if !has_named_pipe && (s.starts_with("\\\\.\\pipe\\") || s.starts_with("\\\\\\\\")) { has_named_pipe = true; }
-            if !has_amsi && (l.contains("amsi.dll") || l.contains("amsiscanbuffer")) { has_amsi = true; }
+            if !has_amsi && (contains_ci(s, "amsi.dll") || contains_ci(s, "amsiscanbuffer")) { has_amsi = true; }
             if !has_onion && s.contains(".onion") { has_onion = true; }
             if has_run_key && has_lsass && has_schtasks && has_powershell && has_cmd
                 && has_temp_path && has_shadow_copy && has_named_pipe && has_amsi && has_onion { break; }
@@ -467,4 +462,12 @@ pub fn build_heuristic_flags(pe: &PeInfo) -> Vec<HeuristicFlag> {
 
     flags.sort_by(|a, b| b.severity.cmp(&a.severity));
     flags
+}
+
+#[inline]
+fn contains_ci(haystack: &str, needle: &str) -> bool {
+    if needle.len() > haystack.len() { return false; }
+    haystack.as_bytes().windows(needle.len()).any(|w|
+        w.iter().zip(needle.as_bytes()).all(|(h, n)| h.to_ascii_lowercase() == *n)
+    )
 }

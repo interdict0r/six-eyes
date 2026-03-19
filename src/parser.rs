@@ -27,14 +27,6 @@ impl SectionLookup {
         Self { entries }
     }
 
-    fn from_sections(sections: &[SectionInfo]) -> Self {
-        let mut entries: Vec<_> = sections.iter()
-            .map(|s| (s.virtual_addr, s.virtual_size.max(s.raw_size), s.raw_offset))
-            .collect();
-        entries.sort_unstable_by_key(|e| e.0);
-        Self { entries }
-    }
-
     fn resolve(&self, rva: u32) -> Option<usize> {
         let idx = self.entries.partition_point(|e| e.0 <= rva);
         if idx == 0 { return None; }
@@ -47,24 +39,21 @@ impl SectionLookup {
     }
 }
 
-// --- Safe read helpers (identical codegen to the old unsafe versions) ---
+// --- Safe read helpers (return Option, never panic on malformed input) ---
 
 #[inline(always)]
-fn read_u16_le(buf: &[u8], offset: usize) -> u16 {
-    u16::from_le_bytes([buf[offset], buf[offset + 1]])
+fn read_u16_le(buf: &[u8], offset: usize) -> Option<u16> {
+    Some(u16::from_le_bytes(buf.get(offset..offset + 2)?.try_into().unwrap()))
 }
 
 #[inline(always)]
-fn read_u32_le(buf: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes([buf[offset], buf[offset + 1], buf[offset + 2], buf[offset + 3]])
+fn read_u32_le(buf: &[u8], offset: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(buf.get(offset..offset + 4)?.try_into().unwrap()))
 }
 
 #[inline(always)]
-fn read_u64_le(buf: &[u8], offset: usize) -> u64 {
-    u64::from_le_bytes([
-        buf[offset], buf[offset + 1], buf[offset + 2], buf[offset + 3],
-        buf[offset + 4], buf[offset + 5], buf[offset + 6], buf[offset + 7],
-    ])
+fn read_u64_le(buf: &[u8], offset: usize) -> Option<u64> {
+    Some(u64::from_le_bytes(buf.get(offset..offset + 8)?.try_into().unwrap()))
 }
 
 // --- Main entry point ---
@@ -158,18 +147,18 @@ pub fn parse_pe(path: &str) -> PeInfo {
         info.overlay = Some(OverlayInfo { offset: last_end, size });
     }
 
-    let (imports, iat_map) = parse_all_imports(&slookup, &buffer, is_64, info.image_base);
+    let (imports, iat_map) = parse_all_imports(&pe, &slookup, &buffer, is_64, info.image_base);
     info.imports = imports;
     info.imphash = compute_imphash(&info.imports);
     info.iat_map = iat_map;
 
-    info.exports = parse_exports(&slookup, &buffer);
+    info.exports = parse_exports(&pe, &slookup, &buffer);
 
     info.block_entropy = compute_block_entropy(&buffer, 1024);
 
-    info.resources = parse_resources(&slookup, &buffer);
+    info.resources = parse_resources(&pe, &slookup, &buffer);
 
-    info.certificate = parse_certificate(&buffer);
+    info.certificate = parse_certificate(&pe, &buffer);
 
     info.detected_language = detect_language(&info, &buffer);
     if info.detected_language.as_deref() == Some("Go") {
@@ -180,19 +169,18 @@ pub fn parse_pe(path: &str) -> PeInfo {
     }
 
     let ep_file_offset = slookup.resolve(info.entry_point);
-    let total_imports: usize = info.imports.iter().map(|i| i.functions.len()).sum();
     info.packer = detect_packer(
         &info.sections, &buffer, ep_file_offset,
-        info.overlay.is_some(), total_imports,
+        info.overlay.is_some(), info.total_imports(),
     );
 
     info.embedded = scan_embedded_artifacts(&buffer, &info.sections);
 
-    let (dlines, dmeta, sxrefs) = compute_disasm_lines(&info, &buffer);
+    let (dlines, dmeta, sxrefs) = compute_disasm_lines(&info, &buffer, &slookup);
     info.disasm_lines = dlines;
     info.disasm_meta  = Some(dmeta);
     info.string_xrefs = sxrefs;
-    info.relocations  = parse_relocations(&slookup, &buffer);
+    info.relocations  = parse_relocations(&pe, &slookup, &buffer);
 
     info.buffer = buffer;
 
@@ -231,8 +219,7 @@ fn compute_imphash(imports: &[ImportInfo]) -> String {
 
 // --- Exports ---
 
-fn parse_exports(slookup: &SectionLookup, buffer: &[u8]) -> Option<ExportInfo> {
-    let pe = VecPE::from_disk_data(buffer);
+fn parse_exports(pe: &VecPE, slookup: &SectionLookup, buffer: &[u8]) -> Option<ExportInfo> {
     let dd = pe.get_data_directory(exe::ImageDirectoryEntry::Export).ok()?;
     let export_rva = dd.virtual_address.0;
     let export_size = dd.size;
@@ -241,13 +228,13 @@ fn parse_exports(slookup: &SectionLookup, buffer: &[u8]) -> Option<ExportInfo> {
     let base_off = slookup.resolve(export_rva)?;
     if base_off + 40 > buffer.len() { return None; }
 
-    let name_rva     = read_u32_le(buffer, base_off + 12);
-    let ordinal_base = read_u32_le(buffer, base_off + 16);
-    let num_funcs    = read_u32_le(buffer, base_off + 20);
-    let num_names    = read_u32_le(buffer, base_off + 24);
-    let func_rva_tbl = read_u32_le(buffer, base_off + 28);
-    let name_rva_tbl = read_u32_le(buffer, base_off + 32);
-    let ord_tbl      = read_u32_le(buffer, base_off + 36);
+    let name_rva     = read_u32_le(buffer, base_off + 12)?;
+    let ordinal_base = read_u32_le(buffer, base_off + 16)?;
+    let num_funcs    = read_u32_le(buffer, base_off + 20)?;
+    let num_names    = read_u32_le(buffer, base_off + 24)?;
+    let func_rva_tbl = read_u32_le(buffer, base_off + 28)?;
+    let name_rva_tbl = read_u32_le(buffer, base_off + 32)?;
+    let ord_tbl      = read_u32_le(buffer, base_off + 36)?;
 
     let dll_name = slookup.resolve(name_rva)
         .map(|o| read_cstring(buffer, o))
@@ -263,8 +250,8 @@ fn parse_exports(slookup: &SectionLookup, buffer: &[u8]) -> Option<ExportInfo> {
         let ncount = (num_names as usize).min(8192);
         for i in 0..ncount {
             if no + i * 4 + 4 > buffer.len() || oo + i * 2 + 2 > buffer.len() { break; }
-            let n_rva = read_u32_le(buffer, no + i * 4);
-            let ord   = read_u16_le(buffer, oo + i * 2) as usize;
+            let n_rva = read_u32_le(buffer, no + i * 4)?;
+            let ord   = read_u16_le(buffer, oo + i * 2)? as usize;
             if ord < count {
                 if let Some(off) = slookup.resolve(n_rva) {
                     name_map[ord] = Some(read_cstring(buffer, off));
@@ -278,7 +265,7 @@ fn parse_exports(slookup: &SectionLookup, buffer: &[u8]) -> Option<ExportInfo> {
 
     for (i, nm) in name_map.iter_mut().enumerate().take(count) {
         if func_off + i * 4 + 4 > buffer.len() { break; }
-        let frva = read_u32_le(buffer, func_off + i * 4);
+        let frva = read_u32_le(buffer, func_off + i * 4)?;
         if frva == 0 { continue; }
 
         let ordinal = (ordinal_base as u16).wrapping_add(i as u16);
@@ -312,11 +299,9 @@ fn compute_block_entropy(buffer: &[u8], block_size: usize) -> Vec<f32> {
 
 // --- Disassembly ---
 
-fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8]) -> (Vec<DisasmLine>, DisasmMeta, HashMap<u32, Vec<usize>>) {
-    let empty = || (Vec::new(), DisasmMeta { calls: 0u16, jumps: 0u16, rets: 0u16, nops: 0u16, func_starts: Vec::new(), user_code: None, arcs: Vec::new(), ip_to_idx: HashMap::new() }, HashMap::new());
+fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8], slookup: &SectionLookup) -> (Vec<DisasmLine>, DisasmMeta, HashMap<u32, Vec<usize>>) {
+    let empty = || (Vec::new(), DisasmMeta::default(), HashMap::new());
     if buffer.is_empty() { return empty(); }
-
-    let slookup = SectionLookup::from_sections(&pe.sections);
 
     let ep_off = match slookup.resolve(pe.entry_point) {
         Some(o) if o < buffer.len() => o,
@@ -336,13 +321,8 @@ fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8]) -> (Vec<DisasmLine>, DisasmM
 
     let mut formatter = IntelFormatter::new();
     let mut output = String::new();
-    let lut = HEX_LUT;
     let mut lines = Vec::with_capacity(instructions.len());
-
-    let mut meta = DisasmMeta { calls: 0u16, jumps: 0u16, rets: 0u16, nops: 0u16, func_starts: Vec::new(), user_code: None, arcs: Vec::new(), ip_to_idx: HashMap::new() };
-
-    let first_ip = instructions[0].ip();
-    let last_ip  = instructions.last().map(|i| i.ip()).unwrap_or(first_ip);
+    let mut meta = DisasmMeta::default();
 
     let (string_va_map, va_to_str_offset) = build_string_va_map(pe);
     let mut string_xrefs: HashMap<u32, Vec<usize>> = HashMap::new();
@@ -352,36 +332,13 @@ fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8]) -> (Vec<DisasmLine>, DisasmM
         formatter.format(instr, &mut output);
 
         let instr_ip = instr.ip();
-        let instr_len = instr.len();
-
-        let (opcode, operands) = split_opcode_operands(&output);
-
         let rva = (instr_ip - pe.image_base) as u32;
-        let hex_bytes = if let Some(foff) = slookup.resolve(rva) {
-            let end = (foff + instr_len).min(buffer.len());
-            let mut buf = Vec::with_capacity(instr_len * 3);
-            for &byte in &buffer[foff..end] {
-                let li = byte as usize * 2;
-                buf.push(lut[li]);
-                buf.push(lut[li + 1]);
-                buf.push(b' ');
-            }
-            // buf contains only ASCII hex digits and spaces
-            unsafe { String::from_utf8_unchecked(buf) }
-        } else {
-            String::new()
-        };
+        let hex_bytes = format_hex_bytes(buffer, &slookup, rva, instr.len());
 
         let fc = instr.flow_control();
-        let kind = match fc {
-            FlowControl::UnconditionalBranch | FlowControl::IndirectBranch => InstrKind::Jump,
-            FlowControl::ConditionalBranch => InstrKind::CondJump,
-            FlowControl::Call | FlowControl::IndirectCall => InstrKind::Call,
-            FlowControl::Return => InstrKind::Ret,
-            FlowControl::Interrupt => InstrKind::Int,
-            _ => {
-                if output.starts_with("nop") { InstrKind::Nop } else { InstrKind::Other }
-            }
+        let kind = match InstrKind::from(fc) {
+            InstrKind::Other if output.starts_with("nop") => InstrKind::Nop,
+            k => k,
         };
 
         let target = match fc {
@@ -401,10 +358,7 @@ fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8]) -> (Vec<DisasmLine>, DisasmM
             InstrKind::Nop      => meta.nops += 1,
             _ => {}
         }
-
-        if is_prologue {
-            meta.func_starts.push(idx as u16);
-        }
+        if is_prologue { meta.func_starts.push(idx as u16); }
 
         let comment = build_comment(instr, &pe.iat_map, &string_va_map, target, bitness);
 
@@ -419,6 +373,7 @@ fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8]) -> (Vec<DisasmLine>, DisasmM
             }
         }
 
+        let (opcode, operands) = split_opcode_operands(&output);
         lines.push(DisasmLine {
             ip: instr_ip, rva, hex_bytes,
             opcode: opcode.to_string(), operands: operands.to_string(),
@@ -426,46 +381,71 @@ fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8]) -> (Vec<DisasmLine>, DisasmM
         });
     }
 
-    meta.ip_to_idx = HashMap::with_capacity(lines.len());
-    for (i, l) in lines.iter().enumerate() {
-        meta.ip_to_idx.insert(l.ip, i);
-    }
+    meta.ip_to_idx = lines.iter().enumerate()
+        .map(|(i, l)| (l.ip, i))
+        .collect();
 
-    if meta.user_code.is_none() {
-        for (idx, line) in lines.iter().enumerate() {
-            if line.kind == InstrKind::Call {
-                if let Some(tgt) = line.target {
-                    if tgt >= first_ip && tgt <= last_ip {
-                        if let Some(&tgt_idx) = meta.ip_to_idx.get(&tgt) {
-                            if lines[tgt_idx].is_prologue {
-                                if tgt_idx != 0 && idx > 0 {
-                                    meta.user_code = Some(tgt_idx as u16);
-                                    break;
-                                }
-                            }
+    meta.user_code = find_user_code(&lines, &meta.ip_to_idx);
+    meta.arcs = compute_branch_arcs(&lines, &meta.ip_to_idx);
+
+    (lines, meta, string_xrefs)
+}
+
+fn format_hex_bytes(buffer: &[u8], slookup: &SectionLookup, rva: u32, instr_len: usize) -> String {
+    let lut = HEX_LUT;
+    match slookup.resolve(rva) {
+        Some(foff) => {
+            let end = (foff + instr_len).min(buffer.len());
+            let mut s = String::with_capacity(instr_len * 3);
+            for &byte in &buffer[foff..end] {
+                let li = byte as usize * 2;
+                s.push(lut[li] as char);
+                s.push(lut[li + 1] as char);
+                s.push(' ');
+            }
+            s
+        }
+        None => String::new(),
+    }
+}
+
+fn find_user_code(lines: &[DisasmLine], ip_to_idx: &HashMap<u64, usize>) -> Option<u16> {
+    if lines.is_empty() { return None; }
+    let first_ip = lines[0].ip;
+    let last_ip = lines.last().unwrap().ip;
+    for (idx, line) in lines.iter().enumerate() {
+        if line.kind == InstrKind::Call {
+            if let Some(tgt) = line.target {
+                if tgt >= first_ip && tgt <= last_ip {
+                    if let Some(&tgt_idx) = ip_to_idx.get(&tgt) {
+                        if lines[tgt_idx].is_prologue && tgt_idx != 0 && idx > 0 {
+                            return Some(tgt_idx as u16);
                         }
                     }
                 }
             }
         }
     }
+    None
+}
 
-    let mut arcs: Vec<BranchArc> = Vec::new();
-    for (i, line) in lines.iter().enumerate() {
-        if matches!(line.kind, InstrKind::Call | InstrKind::Jump | InstrKind::CondJump) {
-            if let Some(tgt) = line.target {
-                if let Some(&tgt_idx) = meta.ip_to_idx.get(&tgt) {
-                    arcs.push(BranchArc { from: i as u16, to: tgt_idx as u16, kind: line.kind, col: 0 });
-                }
-            }
-        }
-    }
+fn compute_branch_arcs(lines: &[DisasmLine], ip_to_idx: &HashMap<u64, usize>) -> Vec<BranchArc> {
+    let mut arcs: Vec<BranchArc> = lines.iter().enumerate()
+        .filter(|(_, line)| line.kind.is_branch())
+        .filter_map(|(i, line)| {
+            let tgt = line.target?;
+            let &tgt_idx = ip_to_idx.get(&tgt)?;
+            Some(BranchArc { from: i as u16, to: tgt_idx as u16, kind: line.kind, col: 0 })
+        })
+        .collect();
 
     arcs.sort_by_key(|a| {
         let lo = a.from.min(a.to);
         let hi = a.from.max(a.to);
         hi - lo
     });
+
+    // Assign non-overlapping columns to arcs
     for i in 0..arcs.len() {
         let lo = arcs[i].from.min(arcs[i].to) as usize;
         let hi = arcs[i].from.max(arcs[i].to) as usize;
@@ -481,9 +461,7 @@ fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8]) -> (Vec<DisasmLine>, DisasmM
         arcs[i].col = used.trailing_ones() as u8;
     }
 
-    meta.arcs = arcs;
-
-    (lines, meta, string_xrefs)
+    arcs
 }
 
 fn split_opcode_operands(text: &str) -> (&str, &str) {
@@ -554,8 +532,7 @@ fn build_comment(
 
 // --- Relocations ---
 
-fn parse_relocations(slookup: &SectionLookup, buffer: &[u8]) -> Option<RelocationInfo> {
-    let pe = VecPE::from_disk_data(buffer);
+fn parse_relocations(pe: &VecPE, slookup: &SectionLookup, buffer: &[u8]) -> Option<RelocationInfo> {
     use exe::headers::ImageDirectoryEntry;
 
     let reloc_dir = pe.get_data_directory(ImageDirectoryEntry::BaseReloc).ok()?;
@@ -572,15 +549,15 @@ fn parse_relocations(slookup: &SectionLookup, buffer: &[u8]) -> Option<Relocatio
     let end = reloc_off + reloc_size;
 
     while pos + 8 <= end {
-        let page_rva = read_u32_le(buffer, pos);
-        let block_size = read_u32_le(buffer, pos + 4) as usize;
+        let page_rva = read_u32_le(buffer, pos)?;
+        let block_size = read_u32_le(buffer, pos + 4)? as usize;
         if block_size < 8 || pos + block_size > end { break; }
 
         let num_entries = (block_size - 8) / 2;
         let mut types = Vec::with_capacity(num_entries);
 
         for i in 0..num_entries {
-            let entry = read_u16_le(buffer, pos + 8 + i * 2);
+            let entry = read_u16_le(buffer, pos + 8 + i * 2)?;
             let reloc_type = (entry >> 12) as u8;
             let offset = entry & 0x0FFF;
             if reloc_type != 0 { // skip IMAGE_REL_BASED_ABSOLUTE (padding)
@@ -649,8 +626,7 @@ fn detect_prologue(instrs: &[Instruction], idx: usize, bitness: u32) -> bool {
 
 // --- Resources ---
 
-fn parse_resources(slookup: &SectionLookup, buffer: &[u8]) -> Option<ResourceInfo> {
-    let pe = VecPE::from_disk_data(buffer);
+fn parse_resources(pe: &VecPE, slookup: &SectionLookup, buffer: &[u8]) -> Option<ResourceInfo> {
     let dd = pe.get_data_directory(exe::ImageDirectoryEntry::Resource).ok()?;
     let rsrc_rva = dd.virtual_address.0;
     if rsrc_rva == 0 || dd.size == 0 { return None; }
@@ -663,15 +639,15 @@ fn parse_resources(slookup: &SectionLookup, buffer: &[u8]) -> Option<ResourceInf
         has_icon: false, resource_types: Vec::new(),
     };
 
-    let num_named = read_u16_le(buffer, rsrc_off + 12) as usize;
-    let num_id    = read_u16_le(buffer, rsrc_off + 14) as usize;
+    let num_named = read_u16_le(buffer, rsrc_off + 12)? as usize;
+    let num_id    = read_u16_le(buffer, rsrc_off + 14)? as usize;
     let total = (num_named + num_id).min(64);
 
     for i in 0..total {
         let entry_off = rsrc_off + 16 + i * 8;
         if entry_off + 8 > buffer.len() { break; }
-        let name_or_id = read_u32_le(buffer, entry_off);
-        let offset_val = read_u32_le(buffer, entry_off + 4);
+        let name_or_id = read_u32_le(buffer, entry_off)?;
+        let offset_val = read_u32_le(buffer, entry_off + 4)?;
 
         let type_id = if name_or_id & 0x8000_0000 != 0 { 0 } else { name_or_id };
         let type_name = match type_id {
@@ -718,23 +694,23 @@ fn parse_resources(slookup: &SectionLookup, buffer: &[u8]) -> Option<ResourceInf
 
 fn walk_resource_to_data<'a>(buffer: &'a [u8], rsrc_off: usize, l2_off: usize, slookup: &SectionLookup) -> Option<&'a [u8]> {
     if l2_off + 16 > buffer.len() { return None; }
-    let num2 = (read_u16_le(buffer, l2_off + 12) as usize
-              + read_u16_le(buffer, l2_off + 14) as usize).min(16);
+    let num2 = (read_u16_le(buffer, l2_off + 12)? as usize
+              + read_u16_le(buffer, l2_off + 14)? as usize).min(16);
     if num2 == 0 { return None; }
 
     let e2_off = l2_off + 16;
     if e2_off + 8 > buffer.len() { return None; }
-    let offset2 = read_u32_le(buffer, e2_off + 4);
+    let offset2 = read_u32_le(buffer, e2_off + 4)?;
 
     if offset2 & 0x8000_0000 != 0 {
         let l3_off = rsrc_off + (offset2 & 0x7FFF_FFFF) as usize;
         if l3_off + 16 > buffer.len() { return None; }
-        let num3 = (read_u16_le(buffer, l3_off + 12) as usize
-                  + read_u16_le(buffer, l3_off + 14) as usize).min(16);
+        let num3 = (read_u16_le(buffer, l3_off + 12)? as usize
+                  + read_u16_le(buffer, l3_off + 14)? as usize).min(16);
         if num3 == 0 { return None; }
         let e3_off = l3_off + 16;
         if e3_off + 8 > buffer.len() { return None; }
-        let data_entry_off = read_u32_le(buffer, e3_off + 4);
+        let data_entry_off = read_u32_le(buffer, e3_off + 4)?;
         if data_entry_off & 0x8000_0000 != 0 { return None; }
         return read_resource_data_entry(buffer, rsrc_off + data_entry_off as usize, slookup);
     }
@@ -744,8 +720,8 @@ fn walk_resource_to_data<'a>(buffer: &'a [u8], rsrc_off: usize, l2_off: usize, s
 
 fn read_resource_data_entry<'a>(buffer: &'a [u8], entry_off: usize, slookup: &SectionLookup) -> Option<&'a [u8]> {
     if entry_off + 16 > buffer.len() { return None; }
-    let data_rva  = read_u32_le(buffer, entry_off);
-    let data_size = read_u32_le(buffer, entry_off + 4) as usize;
+    let data_rva  = read_u32_le(buffer, entry_off)?;
+    let data_size = read_u32_le(buffer, entry_off + 4)? as usize;
     if data_size == 0 || data_size > buffer.len() { return None; }
 
     let file_off = slookup.resolve(data_rva)?;
@@ -761,10 +737,10 @@ fn parse_version_info(data: &[u8]) -> Option<VersionInfo> {
     })?;
     if sig_pos + 52 > data.len() { return None; }
 
-    let ms_file = read_u32_le(data, sig_pos + 8);
-    let ls_file = read_u32_le(data, sig_pos + 12);
-    let ms_prod = read_u32_le(data, sig_pos + 16);
-    let ls_prod = read_u32_le(data, sig_pos + 20);
+    let ms_file = read_u32_le(data, sig_pos + 8)?;
+    let ls_file = read_u32_le(data, sig_pos + 12)?;
+    let ms_prod = read_u32_le(data, sig_pos + 16)?;
+    let ls_prod = read_u32_le(data, sig_pos + 20)?;
 
     let file_version = format!("{}.{}.{}.{}",
         ms_file >> 16, ms_file & 0xFFFF, ls_file >> 16, ls_file & 0xFFFF);
@@ -801,8 +777,7 @@ fn find_version_string(data: &[u8], key: &str) -> Option<String> {
 
 // --- Certificate ---
 
-fn parse_certificate(buffer: &[u8]) -> Option<CertificateInfo> {
-    let pe = VecPE::from_disk_data(buffer);
+fn parse_certificate(pe: &VecPE, buffer: &[u8]) -> Option<CertificateInfo> {
     let dd = pe.get_data_directory(exe::ImageDirectoryEntry::Security).ok()?;
     let offset = dd.virtual_address.0;
     let size = dd.size;
@@ -810,9 +785,9 @@ fn parse_certificate(buffer: &[u8]) -> Option<CertificateInfo> {
     let off = offset as usize;
     if off + 8 > buffer.len() { return None; }
 
-    let _dw_length = read_u32_le(buffer, off);
-    let w_revision = read_u16_le(buffer, off + 4);
-    let w_cert_type = read_u16_le(buffer, off + 6);
+    let _dw_length = read_u32_le(buffer, off)?;
+    let w_revision = read_u16_le(buffer, off + 4)?;
+    let w_cert_type = read_u16_le(buffer, off + 6)?;
 
     let type_label = match w_cert_type {
         0x0001 => "X.509",
@@ -827,8 +802,7 @@ fn parse_certificate(buffer: &[u8]) -> Option<CertificateInfo> {
 
 // --- Unified import parsing (single walk produces both ImportInfo list and IAT map) ---
 
-fn parse_all_imports(slookup: &SectionLookup, buffer: &[u8], is_64: bool, image_base: u64) -> (Vec<ImportInfo>, HashMap<u64, String>) {
-    let pe = VecPE::from_disk_data(buffer);
+fn parse_all_imports(pe: &VecPE, slookup: &SectionLookup, buffer: &[u8], is_64: bool, image_base: u64) -> (Vec<ImportInfo>, HashMap<u64, String>) {
     let (import_rva, import_size) = match pe.get_data_directory(exe::ImageDirectoryEntry::Import) {
         Ok(dd) => (dd.virtual_address.0, dd.size),
         Err(_) => return (Vec::new(), HashMap::new()),
@@ -851,9 +825,9 @@ fn parse_all_imports(slookup: &SectionLookup, buffer: &[u8], is_64: bool, image_
     loop {
         if desc_offset + 20 > buffer.len() { break; }
 
-        let name_rva    = read_u32_le(buffer, desc_offset + 12);
-        let thunk_rva   = read_u32_le(buffer, desc_offset);
-        let first_thunk = read_u32_le(buffer, desc_offset + 16);
+        let name_rva    = read_u32_le(buffer, desc_offset + 12).unwrap_or(0);
+        let thunk_rva   = read_u32_le(buffer, desc_offset).unwrap_or(0);
+        let first_thunk = read_u32_le(buffer, desc_offset + 16).unwrap_or(0);
 
         if name_rva == 0 && thunk_rva == 0 && first_thunk == 0 { break; }
 
@@ -874,8 +848,8 @@ fn parse_all_imports(slookup: &SectionLookup, buffer: &[u8], is_64: bool, image_
                 let mut idx = 0u32;
                 loop {
                     if thunk_off + thunk_size > buffer.len() { break; }
-                    let val: u64 = if is_64 { read_u64_le(buffer, thunk_off) }
-                        else { read_u32_le(buffer, thunk_off) as u64 };
+                    let val: u64 = if is_64 { read_u64_le(buffer, thunk_off).unwrap_or(0) }
+                        else { read_u32_le(buffer, thunk_off).unwrap_or(0) as u64 };
                     if val == 0 { break; }
 
                     let func_name = if val & ordinal_flag != 0 {
@@ -973,7 +947,8 @@ fn extract_strings(data: &[u8], base_offset: usize, section: &str) -> Vec<Extrac
                 wbuf.push(lo);
             } else if let Some(ws) = wstart.take() {
                 if wbuf.len() >= MIN_LEN {
-                    let value = unsafe { String::from_utf8_unchecked(std::mem::take(&mut wbuf)) };
+                    let value = String::from_utf8(std::mem::take(&mut wbuf))
+                        .expect("wbuf only contains printable ASCII");
                     if seen.insert(value.clone()) {
                         let kind = if classify_string(&value) == StringKind::Obfuscated { StringKind::Obfuscated } else { StringKind::Wide };
                         results.push(ExtractedString { value, offset: (base_offset + ws) as u32, kind, section: sec.clone() });
