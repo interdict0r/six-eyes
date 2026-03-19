@@ -6,6 +6,69 @@ use crate::model::*;
 use crate::hashing::*;
 use crate::detection::*;
 
+// --- Canonical RVA-to-file-offset resolver (binary search, O(log n)) ---
+
+struct SectionLookup {
+    entries: Vec<(u32, u32, u32)>, // (virtual_addr, effective_size, raw_offset)
+}
+
+impl SectionLookup {
+    fn from_pe(pe: &VecPE) -> Self {
+        let mut entries = Vec::new();
+        if let Ok(sections) = pe.get_section_table() {
+            for s in sections {
+                let va    = s.virtual_address.0;
+                let vsize = s.virtual_size.max(s.size_of_raw_data);
+                let raw   = s.pointer_to_raw_data.0;
+                entries.push((va, vsize, raw));
+            }
+            entries.sort_unstable_by_key(|e| e.0);
+        }
+        Self { entries }
+    }
+
+    fn from_sections(sections: &[SectionInfo]) -> Self {
+        let mut entries: Vec<_> = sections.iter()
+            .map(|s| (s.virtual_addr, s.virtual_size.max(s.raw_size), s.raw_offset))
+            .collect();
+        entries.sort_unstable_by_key(|e| e.0);
+        Self { entries }
+    }
+
+    fn resolve(&self, rva: u32) -> Option<usize> {
+        let idx = self.entries.partition_point(|e| e.0 <= rva);
+        if idx == 0 { return None; }
+        let (va, vsize, raw) = self.entries[idx - 1];
+        if rva < va + vsize {
+            Some((raw + (rva - va)) as usize)
+        } else {
+            None
+        }
+    }
+}
+
+// --- Safe read helpers (identical codegen to the old unsafe versions) ---
+
+#[inline(always)]
+fn read_u16_le(buf: &[u8], offset: usize) -> u16 {
+    u16::from_le_bytes([buf[offset], buf[offset + 1]])
+}
+
+#[inline(always)]
+fn read_u32_le(buf: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes([buf[offset], buf[offset + 1], buf[offset + 2], buf[offset + 3]])
+}
+
+#[inline(always)]
+fn read_u64_le(buf: &[u8], offset: usize) -> u64 {
+    u64::from_le_bytes([
+        buf[offset], buf[offset + 1], buf[offset + 2], buf[offset + 3],
+        buf[offset + 4], buf[offset + 5], buf[offset + 6], buf[offset + 7],
+    ])
+}
+
+// --- Main entry point ---
+
 pub fn parse_pe(path: &str) -> PeInfo {
     let mut info = PeInfo { path: path.to_string(), ..Default::default() };
 
@@ -59,6 +122,9 @@ pub fn parse_pe(path: &str) -> PeInfo {
         info.rich_entries = rich.entries;
     }
 
+    // Build the canonical section lookup once from the VecPE, used by all sub-parsers
+    let slookup = SectionLookup::from_pe(&pe);
+
     let mut last_end: u32 = 0;
     if let Ok(sections) = pe.get_section_table() {
         for section in sections {
@@ -92,16 +158,18 @@ pub fn parse_pe(path: &str) -> PeInfo {
         info.overlay = Some(OverlayInfo { offset: last_end, size });
     }
 
-    info.imports = parse_imports(&pe, &buffer, is_64);
+    let (imports, iat_map) = parse_all_imports(&slookup, &buffer, is_64, info.image_base);
+    info.imports = imports;
     info.imphash = compute_imphash(&info.imports);
+    info.iat_map = iat_map;
 
-    info.exports = parse_exports(&pe, &buffer);
+    info.exports = parse_exports(&slookup, &buffer);
 
     info.block_entropy = compute_block_entropy(&buffer, 1024);
 
-    info.resources = parse_resources(&pe, &buffer);
+    info.resources = parse_resources(&slookup, &buffer);
 
-    info.certificate = parse_certificate(&pe, &buffer);
+    info.certificate = parse_certificate(&buffer);
 
     info.detected_language = detect_language(&info, &buffer);
     if info.detected_language.as_deref() == Some("Go") {
@@ -111,9 +179,7 @@ pub fn parse_pe(path: &str) -> PeInfo {
         info.rust_info = extract_rust_info(&info.strings);
     }
 
-    let ep_file_offset = info.sections.iter()
-        .find(|s| s.is_ep)
-        .and_then(|s| info.entry_point.checked_sub(s.virtual_addr).map(|rva| (rva + s.raw_offset) as usize));
+    let ep_file_offset = slookup.resolve(info.entry_point);
     let total_imports: usize = info.imports.iter().map(|i| i.functions.len()).sum();
     info.packer = detect_packer(
         &info.sections, &buffer, ep_file_offset,
@@ -122,36 +188,18 @@ pub fn parse_pe(path: &str) -> PeInfo {
 
     info.embedded = scan_embedded_artifacts(&buffer, &info.sections);
 
-    info.iat_map = build_iat_map(&pe, &buffer, is_64, info.image_base);
-
     let (dlines, dmeta, sxrefs) = compute_disasm_lines(&info, &buffer);
     info.disasm_lines = dlines;
     info.disasm_meta  = Some(dmeta);
     info.string_xrefs = sxrefs;
-    info.relocations  = parse_relocations(&pe, &buffer);
+    info.relocations  = parse_relocations(&slookup, &buffer);
 
     info.buffer = buffer;
 
     info
 }
 
-#[inline(always)]
-unsafe fn read_u16_le(buf: &[u8], offset: usize) -> u16 {
-    u16::from_le_bytes([buf[offset], buf[offset + 1]])
-}
-
-#[inline(always)]
-unsafe fn read_u32_le(buf: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes([buf[offset], buf[offset + 1], buf[offset + 2], buf[offset + 3]])
-}
-
-#[inline(always)]
-unsafe fn read_u64_le(buf: &[u8], offset: usize) -> u64 {
-    u64::from_le_bytes([
-        buf[offset], buf[offset + 1], buf[offset + 2], buf[offset + 3],
-        buf[offset + 4], buf[offset + 5], buf[offset + 6], buf[offset + 7],
-    ])
-}
+// --- Import hash ---
 
 fn compute_imphash(imports: &[ImportInfo]) -> String {
     if imports.is_empty() { return String::new(); }
@@ -181,30 +229,33 @@ fn compute_imphash(imports: &[ImportInfo]) -> String {
     md5_hex(&buf)
 }
 
-fn parse_exports(pe: &VecPE, buffer: &[u8]) -> Option<ExportInfo> {
+// --- Exports ---
+
+fn parse_exports(slookup: &SectionLookup, buffer: &[u8]) -> Option<ExportInfo> {
+    let pe = VecPE::from_disk_data(buffer);
     let dd = pe.get_data_directory(exe::ImageDirectoryEntry::Export).ok()?;
     let export_rva = dd.virtual_address.0;
     let export_size = dd.size;
     if export_rva == 0 || export_size == 0 { return None; }
 
-    let base_off = rva_to_offset(pe, export_rva)?;
+    let base_off = slookup.resolve(export_rva)?;
     if base_off + 40 > buffer.len() { return None; }
 
-    let name_rva     = unsafe { read_u32_le(buffer, base_off + 12) };
-    let ordinal_base = unsafe { read_u32_le(buffer, base_off + 16) };
-    let num_funcs    = unsafe { read_u32_le(buffer, base_off + 20) };
-    let num_names    = unsafe { read_u32_le(buffer, base_off + 24) };
-    let func_rva_tbl = unsafe { read_u32_le(buffer, base_off + 28) };
-    let name_rva_tbl = unsafe { read_u32_le(buffer, base_off + 32) };
-    let ord_tbl      = unsafe { read_u32_le(buffer, base_off + 36) };
+    let name_rva     = read_u32_le(buffer, base_off + 12);
+    let ordinal_base = read_u32_le(buffer, base_off + 16);
+    let num_funcs    = read_u32_le(buffer, base_off + 20);
+    let num_names    = read_u32_le(buffer, base_off + 24);
+    let func_rva_tbl = read_u32_le(buffer, base_off + 28);
+    let name_rva_tbl = read_u32_le(buffer, base_off + 32);
+    let ord_tbl      = read_u32_le(buffer, base_off + 36);
 
-    let dll_name = rva_to_offset(pe, name_rva)
+    let dll_name = slookup.resolve(name_rva)
         .map(|o| read_cstring(buffer, o))
         .unwrap_or_default();
 
-    let func_off = rva_to_offset(pe, func_rva_tbl)?;
-    let name_off = rva_to_offset(pe, name_rva_tbl);
-    let ord_off  = rva_to_offset(pe, ord_tbl);
+    let func_off = slookup.resolve(func_rva_tbl)?;
+    let name_off = slookup.resolve(name_rva_tbl);
+    let ord_off  = slookup.resolve(ord_tbl);
 
     let count = (num_funcs as usize).min(8192);
     let mut name_map: Vec<Option<String>> = vec![None; count];
@@ -212,10 +263,10 @@ fn parse_exports(pe: &VecPE, buffer: &[u8]) -> Option<ExportInfo> {
         let ncount = (num_names as usize).min(8192);
         for i in 0..ncount {
             if no + i * 4 + 4 > buffer.len() || oo + i * 2 + 2 > buffer.len() { break; }
-            let n_rva = unsafe { read_u32_le(buffer, no + i * 4) };
-            let ord   = unsafe { read_u16_le(buffer, oo + i * 2) } as usize;
+            let n_rva = read_u32_le(buffer, no + i * 4);
+            let ord   = read_u16_le(buffer, oo + i * 2) as usize;
             if ord < count {
-                if let Some(off) = rva_to_offset(pe, n_rva) {
+                if let Some(off) = slookup.resolve(n_rva) {
                     name_map[ord] = Some(read_cstring(buffer, off));
                 }
             }
@@ -227,14 +278,14 @@ fn parse_exports(pe: &VecPE, buffer: &[u8]) -> Option<ExportInfo> {
 
     for (i, nm) in name_map.iter_mut().enumerate().take(count) {
         if func_off + i * 4 + 4 > buffer.len() { break; }
-        let frva = unsafe { read_u32_le(buffer, func_off + i * 4) };
+        let frva = read_u32_le(buffer, func_off + i * 4);
         if frva == 0 { continue; }
 
         let ordinal = (ordinal_base as u16).wrapping_add(i as u16);
         let name = nm.take();
 
         let forwarded = if frva >= export_rva && frva < export_end_rva {
-            rva_to_offset(pe, frva).map(|o| read_cstring(buffer, o))
+            slookup.resolve(frva).map(|o| read_cstring(buffer, o))
         } else {
             None
         };
@@ -244,6 +295,8 @@ fn parse_exports(pe: &VecPE, buffer: &[u8]) -> Option<ExportInfo> {
 
     Some(ExportInfo { dll_name, num_funcs, num_names, base: ordinal_base, exports })
 }
+
+// --- Block entropy ---
 
 fn compute_block_entropy(buffer: &[u8], block_size: usize) -> Vec<f32> {
     let n = buffer.len().div_ceil(block_size);
@@ -257,11 +310,15 @@ fn compute_block_entropy(buffer: &[u8], block_size: usize) -> Vec<f32> {
     result
 }
 
+// --- Disassembly ---
+
 fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8]) -> (Vec<DisasmLine>, DisasmMeta, HashMap<u32, Vec<usize>>) {
     let empty = || (Vec::new(), DisasmMeta { calls: 0u16, jumps: 0u16, rets: 0u16, nops: 0u16, func_starts: Vec::new(), user_code: None, arcs: Vec::new(), ip_to_idx: HashMap::new() }, HashMap::new());
     if buffer.is_empty() { return empty(); }
 
-    let ep_off = match find_ep_file_offset(pe) {
+    let slookup = SectionLookup::from_sections(&pe.sections);
+
+    let ep_off = match slookup.resolve(pe.entry_point) {
         Some(o) if o < buffer.len() => o,
         _ => return empty(),
     };
@@ -300,7 +357,7 @@ fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8]) -> (Vec<DisasmLine>, DisasmM
         let (opcode, operands) = split_opcode_operands(&output);
 
         let rva = (instr_ip - pe.image_base) as u32;
-        let hex_bytes = if let Some(foff) = rva_to_file_offset_sections(pe, rva) {
+        let hex_bytes = if let Some(foff) = slookup.resolve(rva) {
             let end = (foff + instr_len).min(buffer.len());
             let mut buf = Vec::with_capacity(instr_len * 3);
             for &byte in &buffer[foff..end] {
@@ -495,8 +552,10 @@ fn build_comment(
     String::new()
 }
 
+// --- Relocations ---
 
-fn parse_relocations(pe: &exe::pe::VecPE, buffer: &[u8]) -> Option<RelocationInfo> {
+fn parse_relocations(slookup: &SectionLookup, buffer: &[u8]) -> Option<RelocationInfo> {
+    let pe = VecPE::from_disk_data(buffer);
     use exe::headers::ImageDirectoryEntry;
 
     let reloc_dir = pe.get_data_directory(ImageDirectoryEntry::BaseReloc).ok()?;
@@ -504,7 +563,7 @@ fn parse_relocations(pe: &exe::pe::VecPE, buffer: &[u8]) -> Option<RelocationInf
     let reloc_size = reloc_dir.size as usize;
     if reloc_rva == 0 || reloc_size == 0 { return None; }
 
-    let reloc_off = rva_to_offset(pe, reloc_rva)? ;
+    let reloc_off = slookup.resolve(reloc_rva)?;
     if reloc_off + reloc_size > buffer.len() { return None; }
 
     let mut blocks = Vec::new();
@@ -513,15 +572,15 @@ fn parse_relocations(pe: &exe::pe::VecPE, buffer: &[u8]) -> Option<RelocationInf
     let end = reloc_off + reloc_size;
 
     while pos + 8 <= end {
-        let page_rva = unsafe { read_u32_le(buffer, pos) };
-        let block_size = unsafe { read_u32_le(buffer, pos + 4) } as usize;
+        let page_rva = read_u32_le(buffer, pos);
+        let block_size = read_u32_le(buffer, pos + 4) as usize;
         if block_size < 8 || pos + block_size > end { break; }
 
         let num_entries = (block_size - 8) / 2;
         let mut types = Vec::with_capacity(num_entries);
 
         for i in 0..num_entries {
-            let entry = unsafe { read_u16_le(buffer, pos + 8 + i * 2) };
+            let entry = read_u16_le(buffer, pos + 8 + i * 2);
             let reloc_type = (entry >> 12) as u8;
             let offset = entry & 0x0FFF;
             if reloc_type != 0 { // skip IMAGE_REL_BASED_ABSOLUTE (padding)
@@ -542,6 +601,8 @@ fn parse_relocations(pe: &exe::pe::VecPE, buffer: &[u8]) -> Option<RelocationInf
     if blocks.is_empty() { return None; }
     Some(RelocationInfo { total_entries, blocks })
 }
+
+// --- Prologue detection ---
 
 fn detect_prologue(instrs: &[Instruction], idx: usize, bitness: u32) -> bool {
     let instr = &instrs[idx];
@@ -586,35 +647,14 @@ fn detect_prologue(instrs: &[Instruction], idx: usize, bitness: u32) -> bool {
     false
 }
 
+// --- Resources ---
 
-fn find_ep_file_offset(pe: &PeInfo) -> Option<usize> {
-    let ep = pe.entry_point;
-    for s in &pe.sections {
-        let va = s.virtual_addr;
-        let vsize = s.virtual_size.max(s.raw_size);
-        if ep >= va && ep < va + vsize {
-            return Some((s.raw_offset + (ep - va)) as usize);
-        }
-    }
-    None
-}
-
-fn rva_to_file_offset_sections(pe: &PeInfo, rva: u32) -> Option<usize> {
-    for s in &pe.sections {
-        let va = s.virtual_addr;
-        let vsize = s.virtual_size.max(s.raw_size);
-        if rva >= va && rva < va + vsize {
-            return Some((s.raw_offset + (rva - va)) as usize);
-        }
-    }
-    None
-}
-
-fn parse_resources(pe: &VecPE, buffer: &[u8]) -> Option<ResourceInfo> {
+fn parse_resources(slookup: &SectionLookup, buffer: &[u8]) -> Option<ResourceInfo> {
+    let pe = VecPE::from_disk_data(buffer);
     let dd = pe.get_data_directory(exe::ImageDirectoryEntry::Resource).ok()?;
     let rsrc_rva = dd.virtual_address.0;
     if rsrc_rva == 0 || dd.size == 0 { return None; }
-    let rsrc_off = rva_to_offset(pe, rsrc_rva)?;
+    let rsrc_off = slookup.resolve(rsrc_rva)?;
     if rsrc_off + 16 > buffer.len() { return None; }
 
     let mut info = ResourceInfo {
@@ -623,15 +663,15 @@ fn parse_resources(pe: &VecPE, buffer: &[u8]) -> Option<ResourceInfo> {
         has_icon: false, resource_types: Vec::new(),
     };
 
-    let num_named = unsafe { read_u16_le(buffer, rsrc_off + 12) } as usize;
-    let num_id    = unsafe { read_u16_le(buffer, rsrc_off + 14) } as usize;
+    let num_named = read_u16_le(buffer, rsrc_off + 12) as usize;
+    let num_id    = read_u16_le(buffer, rsrc_off + 14) as usize;
     let total = (num_named + num_id).min(64);
 
     for i in 0..total {
         let entry_off = rsrc_off + 16 + i * 8;
         if entry_off + 8 > buffer.len() { break; }
-        let name_or_id = unsafe { read_u32_le(buffer, entry_off) };
-        let offset_val = unsafe { read_u32_le(buffer, entry_off + 4) };
+        let name_or_id = read_u32_le(buffer, entry_off);
+        let offset_val = read_u32_le(buffer, entry_off + 4);
 
         let type_id = if name_or_id & 0x8000_0000 != 0 { 0 } else { name_or_id };
         let type_name = match type_id {
@@ -652,7 +692,7 @@ fn parse_resources(pe: &VecPE, buffer: &[u8]) -> Option<ResourceInfo> {
                 info.has_manifest = true;
                 if offset_val & 0x8000_0000 != 0 {
                     let l2_off = rsrc_off + (offset_val & 0x7FFF_FFFF) as usize;
-                    if let Some(data) = walk_resource_to_data(buffer, rsrc_off, l2_off) {
+                    if let Some(data) = walk_resource_to_data(buffer, rsrc_off, l2_off, slookup) {
                         info.manifest_xml = std::str::from_utf8(data).ok().map(|s| s.to_string());
                     }
                 }
@@ -661,7 +701,7 @@ fn parse_resources(pe: &VecPE, buffer: &[u8]) -> Option<ResourceInfo> {
                 info.has_version = true;
                 if offset_val & 0x8000_0000 != 0 {
                     let l2_off = rsrc_off + (offset_val & 0x7FFF_FFFF) as usize;
-                    if let Some(data) = walk_resource_to_data(buffer, rsrc_off, l2_off) {
+                    if let Some(data) = walk_resource_to_data(buffer, rsrc_off, l2_off, slookup) {
                         info.version_info = parse_version_info(data);
                     }
                 }
@@ -676,65 +716,44 @@ fn parse_resources(pe: &VecPE, buffer: &[u8]) -> Option<ResourceInfo> {
     Some(info)
 }
 
-fn walk_resource_to_data(buffer: &[u8], rsrc_off: usize, l2_off: usize) -> Option<&[u8]> {
+fn walk_resource_to_data<'a>(buffer: &'a [u8], rsrc_off: usize, l2_off: usize, slookup: &SectionLookup) -> Option<&'a [u8]> {
     if l2_off + 16 > buffer.len() { return None; }
-    let num2 = (unsafe { read_u16_le(buffer, l2_off + 12) } as usize
-              + unsafe { read_u16_le(buffer, l2_off + 14) } as usize).min(16);
+    let num2 = (read_u16_le(buffer, l2_off + 12) as usize
+              + read_u16_le(buffer, l2_off + 14) as usize).min(16);
     if num2 == 0 { return None; }
 
     let e2_off = l2_off + 16;
     if e2_off + 8 > buffer.len() { return None; }
-    let offset2 = unsafe { read_u32_le(buffer, e2_off + 4) };
+    let offset2 = read_u32_le(buffer, e2_off + 4);
 
     if offset2 & 0x8000_0000 != 0 {
         let l3_off = rsrc_off + (offset2 & 0x7FFF_FFFF) as usize;
         if l3_off + 16 > buffer.len() { return None; }
-        let num3 = (unsafe { read_u16_le(buffer, l3_off + 12) } as usize
-                  + unsafe { read_u16_le(buffer, l3_off + 14) } as usize).min(16);
+        let num3 = (read_u16_le(buffer, l3_off + 12) as usize
+                  + read_u16_le(buffer, l3_off + 14) as usize).min(16);
         if num3 == 0 { return None; }
         let e3_off = l3_off + 16;
         if e3_off + 8 > buffer.len() { return None; }
-        let data_entry_off = unsafe { read_u32_le(buffer, e3_off + 4) };
+        let data_entry_off = read_u32_le(buffer, e3_off + 4);
         if data_entry_off & 0x8000_0000 != 0 { return None; }
-        return read_resource_data_entry(buffer, rsrc_off + data_entry_off as usize);
+        return read_resource_data_entry(buffer, rsrc_off + data_entry_off as usize, slookup);
     }
 
-    read_resource_data_entry(buffer, rsrc_off + offset2 as usize)
+    read_resource_data_entry(buffer, rsrc_off + offset2 as usize, slookup)
 }
 
-fn read_resource_data_entry(buffer: &[u8], entry_off: usize) -> Option<&[u8]> {
+fn read_resource_data_entry<'a>(buffer: &'a [u8], entry_off: usize, slookup: &SectionLookup) -> Option<&'a [u8]> {
     if entry_off + 16 > buffer.len() { return None; }
-    let data_rva  = unsafe { read_u32_le(buffer, entry_off) };
-    let data_size = unsafe { read_u32_le(buffer, entry_off + 4) } as usize;
+    let data_rva  = read_u32_le(buffer, entry_off);
+    let data_size = read_u32_le(buffer, entry_off + 4) as usize;
     if data_size == 0 || data_size > buffer.len() { return None; }
 
-    let file_off = rva_to_offset_raw(buffer, data_rva)?;
+    let file_off = slookup.resolve(data_rva)?;
     if file_off + data_size > buffer.len() { return None; }
     Some(&buffer[file_off..file_off + data_size])
 }
 
-fn rva_to_offset_raw(buffer: &[u8], rva: u32) -> Option<usize> {
-    if buffer.len() < 64 { return None; }
-    let pe_off = unsafe { read_u32_le(buffer, 0x3C) } as usize;
-    if pe_off + 6 > buffer.len() { return None; }
-    let num_sections = unsafe { read_u16_le(buffer, pe_off + 6) } as usize;
-    let opt_hdr_size = unsafe { read_u16_le(buffer, pe_off + 20) } as usize;
-    let sec_table = pe_off + 24 + opt_hdr_size;
-
-    for i in 0..num_sections.min(96) {
-        let s_off = sec_table + i * 40;
-        if s_off + 40 > buffer.len() { break; }
-        let va    = unsafe { read_u32_le(buffer, s_off + 12) };
-        let vsize = unsafe { read_u32_le(buffer, s_off + 8) };
-        let raw_d = unsafe { read_u32_le(buffer, s_off + 16) };
-        let raw_s = unsafe { read_u32_le(buffer, s_off + 20) };
-        let effective_size = vsize.max(raw_s);
-        if rva >= va && rva < va + effective_size {
-            return Some((raw_d + (rva - va)) as usize);
-        }
-    }
-    None
-}
+// --- Version info ---
 
 fn parse_version_info(data: &[u8]) -> Option<VersionInfo> {
     let sig_pos = data.windows(4).position(|w| {
@@ -742,10 +761,10 @@ fn parse_version_info(data: &[u8]) -> Option<VersionInfo> {
     })?;
     if sig_pos + 52 > data.len() { return None; }
 
-    let ms_file = unsafe { read_u32_le(data, sig_pos + 8) };
-    let ls_file = unsafe { read_u32_le(data, sig_pos + 12) };
-    let ms_prod = unsafe { read_u32_le(data, sig_pos + 16) };
-    let ls_prod = unsafe { read_u32_le(data, sig_pos + 20) };
+    let ms_file = read_u32_le(data, sig_pos + 8);
+    let ls_file = read_u32_le(data, sig_pos + 12);
+    let ms_prod = read_u32_le(data, sig_pos + 16);
+    let ls_prod = read_u32_le(data, sig_pos + 20);
 
     let file_version = format!("{}.{}.{}.{}",
         ms_file >> 16, ms_file & 0xFFFF, ls_file >> 16, ls_file & 0xFFFF);
@@ -780,7 +799,10 @@ fn find_version_string(data: &[u8], key: &str) -> Option<String> {
     Some(String::from_utf16_lossy(&chars))
 }
 
-fn parse_certificate(pe: &VecPE, buffer: &[u8]) -> Option<CertificateInfo> {
+// --- Certificate ---
+
+fn parse_certificate(buffer: &[u8]) -> Option<CertificateInfo> {
+    let pe = VecPE::from_disk_data(buffer);
     let dd = pe.get_data_directory(exe::ImageDirectoryEntry::Security).ok()?;
     let offset = dd.virtual_address.0;
     let size = dd.size;
@@ -788,9 +810,9 @@ fn parse_certificate(pe: &VecPE, buffer: &[u8]) -> Option<CertificateInfo> {
     let off = offset as usize;
     if off + 8 > buffer.len() { return None; }
 
-    let _dw_length = unsafe { read_u32_le(buffer, off) };
-    let w_revision = unsafe { read_u16_le(buffer, off + 4) };
-    let w_cert_type = unsafe { read_u16_le(buffer, off + 6) };
+    let _dw_length = read_u32_le(buffer, off);
+    let w_revision = read_u16_le(buffer, off + 4);
+    let w_cert_type = read_u16_le(buffer, off + 6);
 
     let type_label = match w_cert_type {
         0x0001 => "X.509",
@@ -803,33 +825,40 @@ fn parse_certificate(pe: &VecPE, buffer: &[u8]) -> Option<CertificateInfo> {
     Some(CertificateInfo { offset, size, revision: w_revision, cert_type: w_cert_type, type_label })
 }
 
-fn parse_imports(pe: &VecPE, buffer: &[u8], is_64: bool) -> Vec<ImportInfo> {
-    let mut result = Vec::new();
+// --- Unified import parsing (single walk produces both ImportInfo list and IAT map) ---
 
+fn parse_all_imports(slookup: &SectionLookup, buffer: &[u8], is_64: bool, image_base: u64) -> (Vec<ImportInfo>, HashMap<u64, String>) {
+    let pe = VecPE::from_disk_data(buffer);
     let (import_rva, import_size) = match pe.get_data_directory(exe::ImageDirectoryEntry::Import) {
         Ok(dd) => (dd.virtual_address.0, dd.size),
-        Err(_) => return result,
+        Err(_) => return (Vec::new(), HashMap::new()),
     };
 
-    if import_rva == 0 || import_size == 0 { return result; }
+    if import_rva == 0 || import_size == 0 { return (Vec::new(), HashMap::new()); }
 
-    let raw_import_offset = match rva_to_offset(pe, import_rva) {
+    let raw_import_offset = match slookup.resolve(import_rva) {
         Some(o) => o,
-        None    => return result,
+        None    => return (Vec::new(), HashMap::new()),
     };
 
+    let thunk_size: usize = if is_64 { 8 } else { 4 };
+    let ordinal_flag: u64 = if is_64 { 0x8000_0000_0000_0000 } else { 0x8000_0000 };
+
+    let mut imports = Vec::new();
+    let mut iat_map = HashMap::new();
     let mut desc_offset = raw_import_offset;
+
     loop {
         if desc_offset + 20 > buffer.len() { break; }
 
-        let name_rva    = unsafe { read_u32_le(buffer, desc_offset + 12) };
-        let thunk_rva   = unsafe { read_u32_le(buffer, desc_offset) };
-        let first_thunk = unsafe { read_u32_le(buffer, desc_offset + 16) };
+        let name_rva    = read_u32_le(buffer, desc_offset + 12);
+        let thunk_rva   = read_u32_le(buffer, desc_offset);
+        let first_thunk = read_u32_le(buffer, desc_offset + 16);
 
         if name_rva == 0 && thunk_rva == 0 && first_thunk == 0 { break; }
 
         let dll_name = if name_rva != 0 {
-            rva_to_offset(pe, name_rva)
+            slookup.resolve(name_rva)
                 .map(|off| read_cstring(buffer, off))
                 .unwrap_or_else(|| "(unknown)".into())
         } else {
@@ -837,90 +866,16 @@ fn parse_imports(pe: &VecPE, buffer: &[u8], is_64: bool) -> Vec<ImportInfo> {
         };
 
         let mut functions = Vec::new();
-        let thunk_start = if thunk_rva != 0 { thunk_rva } else { first_thunk };
-
-        if thunk_start != 0 {
-            if let Some(mut thunk_off) = rva_to_offset(pe, thunk_start) {
-                let thunk_size = if is_64 { 8usize } else { 4usize };
-                let ordinal_flag: u64 = if is_64 { 0x8000_0000_0000_0000 } else { 0x8000_0000 };
-                loop {
-                    if thunk_off + thunk_size > buffer.len() { break; }
-                    let val: u64 = unsafe {
-                        if is_64 { read_u64_le(buffer, thunk_off) }
-                        else     { read_u32_le(buffer, thunk_off) as u64 }
-                    };
-                    if val == 0 { break; }
-                    if val & ordinal_flag != 0 {
-                        functions.push(format!("Ordinal#{}", val & 0xFFFF));
-                    } else {
-                        let hint_rva = (val & 0x7FFF_FFFF) as u32;
-                        if let Some(hoff) = rva_to_offset(pe, hint_rva) {
-                            let fname = read_cstring(buffer, hoff + 2);
-                            if !fname.is_empty() { functions.push(fname); }
-                        }
-                    }
-                    thunk_off += thunk_size;
-                    if functions.len() > 2000 { functions.push("... (truncated)".into()); break; }
-                }
-            }
-        }
-
-        result.push(ImportInfo { dll: dll_name, functions });
-        desc_offset += 20;
-        if result.len() > 512 { break; }
-    }
-
-    result
-}
-
-fn build_iat_map(pe: &VecPE, buffer: &[u8], is_64: bool, image_base: u64) -> HashMap<u64, String> {
-    let mut map = HashMap::new();
-
-    let (import_rva, import_size) = match pe.get_data_directory(exe::ImageDirectoryEntry::Import) {
-        Ok(dd) => (dd.virtual_address.0, dd.size),
-        Err(_) => return map,
-    };
-    if import_rva == 0 || import_size == 0 { return map; }
-
-    let slookup = SectionLookup::from_pe(pe);
-
-    let raw_import_offset = match slookup.resolve(import_rva) {
-        Some(o) => o,
-        None    => return map,
-    };
-
-    let thunk_size: usize = if is_64 { 8 } else { 4 };
-    let ordinal_flag: u64 = if is_64 { 0x8000_0000_0000_0000 } else { 0x8000_0000 };
-
-    let mut desc_offset = raw_import_offset;
-    loop {
-        if desc_offset + 20 > buffer.len() { break; }
-        let name_rva    = unsafe { read_u32_le(buffer, desc_offset + 12) };
-        let thunk_rva   = unsafe { read_u32_le(buffer, desc_offset) };
-        let first_thunk = unsafe { read_u32_le(buffer, desc_offset + 16) };
-
-        if name_rva == 0 && thunk_rva == 0 && first_thunk == 0 { break; }
-
-        let dll_name = if name_rva != 0 {
-            slookup.resolve(name_rva)
-                .map(|off| read_cstring(buffer, off))
-                .unwrap_or_default()
-        } else {
-            String::new()
-        };
-
         let name_thunk_start = if thunk_rva != 0 { thunk_rva } else { first_thunk };
         let iat_rva_start = first_thunk;
 
-        if name_thunk_start != 0 && iat_rva_start != 0 {
-            if let Some(mut name_off) = slookup.resolve(name_thunk_start) {
+        if name_thunk_start != 0 {
+            if let Some(mut thunk_off) = slookup.resolve(name_thunk_start) {
                 let mut idx = 0u32;
                 loop {
-                    if name_off + thunk_size > buffer.len() { break; }
-                    let val: u64 = unsafe {
-                        if is_64 { read_u64_le(buffer, name_off) }
-                        else     { read_u32_le(buffer, name_off) as u64 }
-                    };
+                    if thunk_off + thunk_size > buffer.len() { break; }
+                    let val: u64 = if is_64 { read_u64_le(buffer, thunk_off) }
+                        else { read_u32_le(buffer, thunk_off) as u64 };
                     if val == 0 { break; }
 
                     let func_name = if val & ordinal_flag != 0 {
@@ -933,67 +888,31 @@ fn build_iat_map(pe: &VecPE, buffer: &[u8], is_64: bool, image_base: u64) -> Has
                     };
 
                     if !func_name.is_empty() {
-                        let entry_va = image_base + iat_rva_start as u64 + (idx as u64 * thunk_size as u64);
-                        map.insert(entry_va, format!("{}!{}", dll_name, func_name));
+                        functions.push(func_name.clone());
+
+                        // Build IAT map entry (VA -> "dll!func") for disassembly resolution
+                        if iat_rva_start != 0 {
+                            let entry_va = image_base + iat_rva_start as u64 + (idx as u64 * thunk_size as u64);
+                            iat_map.insert(entry_va, format!("{}!{}", dll_name, func_name));
+                        }
                     }
 
-                    name_off += thunk_size;
+                    thunk_off += thunk_size;
                     idx += 1;
-                    if idx > 4000 { break; }
+                    if functions.len() > 2000 { functions.push("... (truncated)".into()); break; }
                 }
             }
         }
 
+        imports.push(ImportInfo { dll: dll_name, functions });
         desc_offset += 20;
-        if map.len() > 16000 { break; }
+        if imports.len() > 512 { break; }
     }
 
-    map
+    (imports, iat_map)
 }
 
-struct SectionLookup {
-    entries: Vec<(u32, u32, u32)>,
-}
-
-impl SectionLookup {
-    fn from_pe(pe: &VecPE) -> Self {
-        let mut entries = Vec::new();
-        if let Ok(sections) = pe.get_section_table() {
-            for s in sections {
-                let va    = s.virtual_address.0;
-                let vsize = s.virtual_size.max(s.size_of_raw_data);
-                let raw   = s.pointer_to_raw_data.0;
-                entries.push((va, vsize, raw));
-            }
-            entries.sort_unstable_by_key(|e| e.0);
-        }
-        Self { entries }
-    }
-
-    fn resolve(&self, rva: u32) -> Option<usize> {
-        let idx = self.entries.partition_point(|e| e.0 <= rva);
-        if idx == 0 { return None; }
-        let (va, vsize, raw) = self.entries[idx - 1];
-        if rva < va + vsize {
-            Some((raw + (rva - va)) as usize)
-        } else {
-            None
-        }
-    }
-}
-
-fn rva_to_offset(pe: &VecPE, rva: u32) -> Option<usize> {
-    if let Ok(sections) = pe.get_section_table() {
-        for s in sections {
-            let va    = s.virtual_address.0;
-            let vsize = s.virtual_size.max(s.size_of_raw_data);
-            if rva >= va && rva < va + vsize {
-                return Some((s.pointer_to_raw_data.0 + (rva - va)) as usize);
-            }
-        }
-    }
-    None
-}
+// --- Helpers ---
 
 #[inline]
 fn read_cstring(data: &[u8], offset: usize) -> String {
@@ -1068,6 +987,8 @@ fn extract_strings(data: &[u8], base_offset: usize, section: &str) -> Vec<Extrac
 
     results
 }
+
+// --- String classification ---
 
 struct ByteStats {
     alpha:  u16,
@@ -1183,7 +1104,6 @@ fn starts_with_ignore_ascii_case(haystack: &[u8], needle: &[u8]) -> bool {
     haystack[..needle.len()].iter().zip(needle).all(|(h, n)| h.to_ascii_uppercase() == *n)
 }
 
-
 #[inline]
 fn looks_like_base64(s: &str) -> bool {
     let bytes = s.as_bytes();
@@ -1250,6 +1170,8 @@ fn shannon_entropy(data: &[u8]) -> f32 {
     }
     ent as f32
 }
+
+// --- PE header helpers ---
 
 fn subsystem_name(sub: u16) -> String {
     match sub {

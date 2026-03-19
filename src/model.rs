@@ -230,7 +230,7 @@ pub struct ExtractedString {
     pub section: Rc<str>,
 }
 
-#[derive(PartialEq, Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum StringKind { Ascii, Wide, Obfuscated }
 
 impl StringKind {
@@ -285,8 +285,8 @@ pub struct RelocBlock {
     pub types:    Vec<(u8, u16)>,
 }
 
-#[derive(Default, PartialEq, Clone, Copy)]
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
 pub enum Tab { #[default] Overview, Imports, Exports, Strings, Heuristics, HexView, Disasm }
 
-#[derive(Default, PartialEq, Clone, Copy)]
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
 pub enum StringKindFilter { #[default] All, Ascii, Wide, Obfuscated }

@@ -137,25 +137,14 @@ pub fn detect_language(pe: &PeInfo, buffer: &[u8]) -> Option<String> {
 }
 
 fn validate_pclntab(buffer: &[u8]) -> bool {
-    const MAGICS: [[u8; 4]; 4] = [
-        [0xFB, 0xFF, 0xFF, 0xFF],
-        [0xFA, 0xFF, 0xFF, 0xFF],
-        [0xF0, 0xFF, 0xFF, 0xFF],
-        [0xF1, 0xFF, 0xFF, 0xFF],
-    ];
     if buffer.len() < 8 { return false; }
-    for magic in &MAGICS {
-        for window in buffer.windows(8) {
-            if &window[..4] == magic
-                && window[4] == 0 && window[5] == 0
-                && matches!(window[6], 1 | 2 | 4)
-                && matches!(window[7], 4 | 8)
-            {
-                return true;
-            }
-        }
-    }
-    false
+    buffer.windows(8).any(|w| {
+        matches!(w[0], 0xFB | 0xFA | 0xF0 | 0xF1)
+            && w[1] == 0xFF && w[2] == 0xFF && w[3] == 0xFF
+            && w[4] == 0 && w[5] == 0
+            && matches!(w[6], 1 | 2 | 4)
+            && matches!(w[7], 4 | 8)
+    })
 }
 
 pub fn parse_go_pclntab(buffer: &[u8]) -> Option<GoInfo> {
@@ -412,13 +401,11 @@ fn match_ep_signature(ep_bytes: &[u8]) -> Option<(&'static str, &'static str)> {
 }
 
 fn match_section_names(sections: &[SectionInfo]) -> Option<(&'static str, &'static str)> {
-    let sec_names: Vec<&str> = sections.iter().map(|s| s.name.as_str()).collect();
-    for pat in SECTION_PATTERNS {
-        if pat.names.iter().any(|n| sec_names.iter().any(|s| s.eq_ignore_ascii_case(n))) {
-            return Some((pat.name, pat.detail));
-        }
-    }
-    None
+    SECTION_PATTERNS.iter().find_map(|pat| {
+        sections.iter()
+            .any(|s| pat.names.iter().any(|n| s.name.eq_ignore_ascii_case(n)))
+            .then_some((pat.name, pat.detail))
+    })
 }
 
 
@@ -498,131 +485,215 @@ pub fn detect_packer(
         }
     }
 
-    // .NET protector / installer detection via buffer string markers
-    if let Some(result) = detect_dotnet_protector(buffer) {
-        return Some(result);
-    }
-    if let Some(result) = detect_installer_markers(buffer) {
+    // .NET protector / installer detection via single-pass buffer string scan
+    if let Some(result) = detect_markers(buffer) {
         return Some(result);
     }
 
     None
 }
 
-fn buf_contains(buffer: &[u8], needle: &[u8]) -> bool {
-    buffer.windows(needle.len()).any(|w| w == needle)
+/// Index for single-pass multi-needle search over a byte buffer.
+/// Groups needles by their first byte so each position only checks relevant needles.
+struct NeedleScanner<'a> {
+    needles: &'a [&'a [u8]],
+    /// For each possible first byte, the list of needle indices that start with it.
+    by_first: [Vec<usize>; 256],
+    max_needle: usize,
 }
 
-fn detect_dotnet_protector(buffer: &[u8]) -> Option<PackerInfo> {
-    // ConfuserEx: embeds module-level name or Costura resource loader
-    if buf_contains(buffer, b"ConfuserEx") || buf_contains(buffer, b"Costura.AssemblyLoader") {
+impl<'a> NeedleScanner<'a> {
+    fn new(needles: &'a [&'a [u8]]) -> Self {
+        let mut by_first: [Vec<usize>; 256] = std::array::from_fn(|_| Vec::new());
+        let mut max_needle = 0usize;
+        for (idx, needle) in needles.iter().enumerate() {
+            if !needle.is_empty() {
+                by_first[needle[0] as usize].push(idx);
+                max_needle = max_needle.max(needle.len());
+            }
+        }
+        Self { needles, by_first, max_needle }
+    }
+
+    /// Scan `buffer` once, returning a bitset (as u32) of which needle indices were found.
+    /// Supports up to 32 needles.
+    fn scan(&self, buffer: &[u8]) -> u32 {
+        debug_assert!(self.needles.len() <= 32);
+        let all_bits = (1u32 << self.needles.len()) - 1;
+        let mut found = 0u32;
+        if buffer.len() < self.max_needle || self.needles.is_empty() {
+            return found;
+        }
+        let search_end = buffer.len() - self.max_needle + 1;
+        for pos in 0..buffer.len() {
+            let candidates = &self.by_first[buffer[pos] as usize];
+            for &idx in candidates {
+                if found & (1 << idx) != 0 { continue; } // already found
+                let needle = self.needles[idx];
+                if pos + needle.len() <= buffer.len() && buffer[pos..pos + needle.len()] == *needle {
+                    found |= 1 << idx;
+                    if found == all_bits { return found; }
+                }
+            }
+            if pos >= search_end && found != 0 {
+                // Past the point where the longest needle could start;
+                // no new matches possible if all remaining needles are max length.
+                // But shorter needles could still match, so keep going.
+            }
+        }
+        found
+    }
+}
+
+// Needle indices for the combined protector + installer scan.
+// .NET protectors:
+const N_CONFUSEREX: usize      = 0;
+const N_COSTURA: usize          = 1;
+const N_CONFUSER_V: usize       = 2;
+const N_NETREACTOR: usize       = 3;
+const N_DOT_NETREACTOR: usize   = 4;
+const N_EAZFUSCATOR: usize      = 5;
+const N_SMARTASSEMBLY: usize    = 6;
+const N_DOTFUSCATOR: usize      = 7;
+const N_DE4DOT: usize           = 8;
+// Installers:
+const N_NULLSOFT_FULL: usize    = 9;
+const N_NULLSOFT_SHORT: usize   = 10;
+const N_INNO_SETUP: usize       = 11;
+const N_INNOSETUP: usize        = 12;
+const N_INSTALLSHIELD: usize    = 13;
+const N_WIX_TOOLSET: usize      = 14;
+const N_WIX_XML: usize          = 15;
+const N_7ZIP: usize             = 16;
+const N_SFX: usize              = 17;
+const N_WINRAR: usize           = 18;
+const N_SELF_EXTRACTING: usize  = 19;
+
+const MARKER_NEEDLES: &[&[u8]] = &[
+    b"ConfuserEx",                       // 0
+    b"Costura.AssemblyLoader",           // 1
+    b"Confuser v",                       // 2
+    b"NETReactor",                       // 3
+    b".NETReactor",                      // 4
+    b"Eazfuscator.NET",                  // 5
+    b"Obfuscated with SmartAssembly",    // 6
+    b"Dotfuscator",                      // 7
+    b"de4dot",                           // 8
+    b"Nullsoft Install System",          // 9
+    b"NullsoftInst",                     // 10
+    b"Inno Setup",                       // 11
+    b"InnoSetup",                        // 12
+    b"InstallShield",                    // 13
+    b"WiX Toolset",                      // 14
+    b"Windows Installer XML",            // 15
+    b"7-Zip",                            // 16
+    b"SFX",                              // 17
+    b"WinRAR",                           // 18
+    b"self-extracting",                  // 19
+];
+
+fn has(bits: u32, idx: usize) -> bool { bits & (1 << idx) != 0 }
+
+fn detect_markers(buffer: &[u8]) -> Option<PackerInfo> {
+    let scanner = NeedleScanner::new(MARKER_NEEDLES);
+    let bits = scanner.scan(buffer);
+    if bits == 0 { return None; }
+
+    // .NET protectors (checked first, matching original priority order)
+    if has(bits, N_CONFUSEREX) || has(bits, N_COSTURA) {
         return Some(PackerInfo {
             name: "ConfuserEx",
             confidence: PackerConfidence::High,
-            details: "ConfuserEx marker string detected in binary".to_string(),
+            details: "ConfuserEx marker string detected in binary".into(),
         });
     }
-    // Confuser (original): older marker
-    if buf_contains(buffer, b"Confuser v") {
+    if has(bits, N_CONFUSER_V) {
         return Some(PackerInfo {
             name: "Confuser",
             confidence: PackerConfidence::High,
-            details: "Confuser version marker string detected".to_string(),
+            details: "Confuser version marker string detected".into(),
         });
     }
-    // .NET Reactor: distinctive section or string
-    if buf_contains(buffer, b"NETReactor") || buf_contains(buffer, b".NETReactor") {
+    if has(bits, N_NETREACTOR) || has(bits, N_DOT_NETREACTOR) {
         return Some(PackerInfo {
             name: ".NET Reactor",
             confidence: PackerConfidence::High,
-            details: ".NET Reactor marker string detected".to_string(),
+            details: ".NET Reactor marker string detected".into(),
         });
     }
-    // Eazfuscator
-    if buf_contains(buffer, b"Eazfuscator.NET") {
+    if has(bits, N_EAZFUSCATOR) {
         return Some(PackerInfo {
             name: "Eazfuscator",
             confidence: PackerConfidence::High,
-            details: "Eazfuscator.NET marker string detected".to_string(),
+            details: "Eazfuscator.NET marker string detected".into(),
         });
     }
-    // SmartAssembly — only the specific obfuscation phrase; bare "SmartAssembly" is too broad
-    // (could appear in any documentation text or version info referencing the tool).
-    if buf_contains(buffer, b"Obfuscated with SmartAssembly") {
+    if has(bits, N_SMARTASSEMBLY) {
         return Some(PackerInfo {
             name: "SmartAssembly",
             confidence: PackerConfidence::High,
-            details: "SmartAssembly obfuscation marker detected".to_string(),
+            details: "SmartAssembly obfuscation marker detected".into(),
         });
     }
-    // Dotfuscator
-    if buf_contains(buffer, b"Dotfuscator") {
+    if has(bits, N_DOTFUSCATOR) {
         return Some(PackerInfo {
             name: "Dotfuscator",
             confidence: PackerConfidence::High,
-            details: "Dotfuscator marker string detected".to_string(),
+            details: "Dotfuscator marker string detected".into(),
         });
     }
-    // de4dot (deobfuscated marker — ironic, but common in repackaged samples)
-    if buf_contains(buffer, b"de4dot") {
+    if has(bits, N_DE4DOT) {
         return Some(PackerInfo {
             name: "de4dot-processed",
             confidence: PackerConfidence::Medium,
-            details: "de4dot deobfuscation marker — binary was likely previously obfuscated".to_string(),
+            details: "de4dot deobfuscation marker — binary was likely previously obfuscated".into(),
         });
     }
-    None
-}
 
-fn detect_installer_markers(buffer: &[u8]) -> Option<PackerInfo> {
-    // NSIS: Nullsoft Scriptable Install System
-    if buf_contains(buffer, b"Nullsoft Install System") || buf_contains(buffer, b"NullsoftInst") {
+    // Installer markers
+    if has(bits, N_NULLSOFT_FULL) || has(bits, N_NULLSOFT_SHORT) {
         return Some(PackerInfo {
             name: "NSIS Installer",
             confidence: PackerConfidence::High,
-            details: "Nullsoft Install System marker string detected".to_string(),
+            details: "Nullsoft Install System marker string detected".into(),
         });
     }
-    // Inno Setup
-    if buf_contains(buffer, b"Inno Setup") || buf_contains(buffer, b"InnoSetup") {
+    if has(bits, N_INNO_SETUP) || has(bits, N_INNOSETUP) {
         return Some(PackerInfo {
             name: "Inno Setup",
             confidence: PackerConfidence::High,
-            details: "Inno Setup marker string detected".to_string(),
+            details: "Inno Setup marker string detected".into(),
         });
     }
-    // InstallShield
-    if buf_contains(buffer, b"InstallShield") {
+    if has(bits, N_INSTALLSHIELD) {
         return Some(PackerInfo {
             name: "InstallShield",
             confidence: PackerConfidence::High,
-            details: "InstallShield installer marker detected".to_string(),
+            details: "InstallShield installer marker detected".into(),
         });
     }
-    // WiX Toolset
-    if buf_contains(buffer, b"WiX Toolset") || buf_contains(buffer, b"Windows Installer XML") {
+    if has(bits, N_WIX_TOOLSET) || has(bits, N_WIX_XML) {
         return Some(PackerInfo {
             name: "WiX Installer",
             confidence: PackerConfidence::High,
-            details: "WiX Toolset installer marker detected".to_string(),
+            details: "WiX Toolset installer marker detected".into(),
         });
     }
-    // 7-Zip SFX
-    if buf_contains(buffer, b"7-Zip") && buf_contains(buffer, b"SFX") {
+    if has(bits, N_7ZIP) && has(bits, N_SFX) {
         return Some(PackerInfo {
             name: "7-Zip SFX",
             confidence: PackerConfidence::High,
-            details: "7-Zip self-extracting archive detected".to_string(),
+            details: "7-Zip self-extracting archive detected".into(),
         });
     }
-    // WinRAR SFX
-    if buf_contains(buffer, b"WinRAR") && (buf_contains(buffer, b"SFX") || buf_contains(buffer, b"self-extracting")) {
+    if has(bits, N_WINRAR) && (has(bits, N_SFX) || has(bits, N_SELF_EXTRACTING)) {
         return Some(PackerInfo {
             name: "WinRAR SFX",
             confidence: PackerConfidence::High,
-            details: "WinRAR self-extracting archive detected".to_string(),
+            details: "WinRAR self-extracting archive detected".into(),
         });
     }
+
     None
 }
 

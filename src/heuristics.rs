@@ -350,134 +350,53 @@ pub fn build_heuristic_flags(pe: &PeInfo) -> Vec<HeuristicFlag> {
 
     let all_fns: HashSet<&str> = pe.imports.iter().flat_map(|i| i.functions.iter().map(|s| s.as_str())).collect();
 
-    check_api_set(&mut flags, &all_fns, "Imports", Severity::Critical,
-        &["VirtualAllocEx","WriteProcessMemory","CreateRemoteThread","NtCreateThreadEx","RtlCreateUserThread","QueueUserAPC"],
-        "Process Injection [T1055]");
-    check_api_set(&mut flags, &all_fns, "Imports", Severity::Critical,
-        &["ZwUnmapViewOfSection","NtUnmapViewOfSection","SetThreadContext","GetThreadContext"],
-        "Process Hollowing [T1055.012]");
-    check_api_set(&mut flags, &all_fns, "Imports", Severity::Warn,
-        &["CryptAcquireContext","CryptEncrypt","CryptDecrypt","BCryptEncrypt","BCryptDecrypt","BCryptGenRandom"],
-        "Crypto Operations [T1027]");
-    check_api_set(&mut flags, &all_fns, "Imports", Severity::Warn,
-        &["InternetOpenA","InternetOpenW","HttpOpenRequestA","WinHttpOpen","URLDownloadToFileA","WSAStartup","connect","send","recv"],
-        "Network I/O [T1071]");
-    check_api_set(&mut flags, &all_fns, "Imports", Severity::Warn,
-        &["IsDebuggerPresent","CheckRemoteDebuggerPresent","NtQueryInformationProcess","FindWindowA","OutputDebugStringA"],
-        "Anti-Debug [T1622]");
-    check_api_set(&mut flags, &all_fns, "Imports", Severity::Warn,
-        &["RegOpenKeyExA","RegSetValueExA","RegCreateKeyExA"],
-        "Registry Access [T1112]");
-    check_api_set(&mut flags, &all_fns, "Imports", Severity::Warn,
-        &["CreateProcessA","CreateProcessW","ShellExecuteA","ShellExecuteW","WinExec"],
-        "Process Creation [T1106]");
-    check_api_set(&mut flags, &all_fns, "Imports", Severity::Critical,
-        &["SetWindowsHookExA","SetWindowsHookExW","GetAsyncKeyState","GetKeyState","GetKeyboardState"],
-        "Keylogging [T1056.001]");
-    check_api_set(&mut flags, &all_fns, "Imports", Severity::Critical,
-        &["OpenProcessToken","AdjustTokenPrivileges","LookupPrivilegeValueA","ImpersonateLoggedOnUser"],
-        "Token Manipulation [T1134]");
-    check_api_set(&mut flags, &all_fns, "Imports", Severity::Critical,
-        &["MiniDumpWriteDump","SamConnect","LsaOpenPolicy","LsaQueryInformationPolicy","SamOpenDomain"],
-        "Credential Dumping [T1003]");
-    check_api_set(&mut flags, &all_fns, "Imports", Severity::Critical,
-        &["AmsiScanBuffer","AmsiInitialize","AmsiOpenSession"],
-        "AMSI Bypass [T1562.001]");
-    // EtwEventWrite omitted: imported by any program emitting ETW diagnostic events (normal).
-    // NtTraceControl / NtTraceEvent are low-level Nt* calls not used in legitimate user-mode code.
-    check_api_set(&mut flags, &all_fns, "Imports", Severity::Critical,
-        &["NtTraceControl","NtTraceEvent"],
-        "ETW Bypass [T1562.006]");
-    check_api_set(&mut flags, &all_fns, "Imports", Severity::Critical,
-        &["WNetAddConnection2A","WNetAddConnection2W","NetShareEnum","NetSessionEnum"],
-        "Lateral Movement [T1021]");
-    // ITaskService is a COM interface name, not an importable symbol — excluded.
-    check_api_set(&mut flags, &all_fns, "Imports", Severity::Critical,
-        &["NetScheduleJobAdd","NetScheduleJobEnum"],
-        "Scheduled Task [T1053.005]");
-    check_api_set(&mut flags, &all_fns, "Imports", Severity::Critical,
-        &["InternetWriteFile","FtpPutFileA","FtpPutFileW","WinHttpWriteData"],
-        "Data Exfiltration [T1041]");
-    check_api_set(&mut flags, &all_fns, "Imports", Severity::Warn,
-        &["CreateNamedPipeA","CreateNamedPipeW","ConnectNamedPipe"],
-        "Named Pipe IPC [T1071.004]");
-    check_api_set(&mut flags, &all_fns, "Imports", Severity::Warn,
-        &["GetSystemInfo","GetComputerNameA","GetComputerNameW","GetAdaptersInfo","GetNativeSystemInfo"],
-        "System Discovery [T1082]");
+    for def in CAPABILITIES {
+        let matched: Vec<&str> = def.apis.iter().copied().filter(|a| all_fns.contains(a)).collect();
+        if !matched.is_empty() {
+            let sev = match def.threat {
+                2 => Severity::Critical,
+                1 => Severity::Warn,
+                _ => Severity::Info,
+            };
+            flags.push(HeuristicFlag {
+                severity: sev, category: "Imports",
+                message: format!("{} [{}]: {}", def.name, def.mitre, matched.join(", ")),
+            });
+        }
+    }
 
-    // String-based heuristics — catches evidence invisible to import-only analysis
+    // String-based heuristics — single pass over all strings
     {
-        let string_vals: Vec<&str> = pe.strings.iter().map(|s| s.value.as_str()).collect();
+        let (mut has_run_key, mut has_lsass, mut has_schtasks, mut has_powershell,
+             mut has_cmd, mut has_temp_path, mut has_shadow_copy, mut has_named_pipe,
+             mut has_amsi, mut has_onion) = (false, false, false, false, false, false, false, false, false, false);
 
-        // Persistence via registry Run key
-        if string_vals.iter().any(|s| s.contains("CurrentVersion\\Run") || s.contains("CurrentVersion/Run")) {
-            f!(Severity::Critical, "Strings", "Registry Run key path detected — likely persistence [T1547.001]");
-        }
-
-        // LSASS memory access pattern
-        if string_vals.iter().any(|s| s.contains("lsass") || s.contains("LSASS")) {
-            f!(Severity::Critical, "Strings", "LSASS process name in strings — possible credential dumping [T1003.001]");
-        }
-
-        // Scheduled task command
-        // "at.exe" is excluded as a substring match — it matches "bloat.exe", "data.exe", etc.
-        // Require schtasks or a combined /create+task signal instead.
-        if string_vals.iter().any(|s| {
+        for s in pe.strings.iter().map(|s| s.value.as_str()) {
             let l = s.to_ascii_lowercase();
-            l.contains("schtasks") || (l.contains("/create") && l.contains("task"))
-        }) {
-            f!(Severity::Critical, "Strings", "Scheduled task command in strings — likely persistence [T1053.005]");
+            if !has_run_key && (l.contains("currentversion\\run") || l.contains("currentversion/run")) { has_run_key = true; }
+            if !has_lsass && l.contains("lsass") { has_lsass = true; }
+            if !has_schtasks && (l.contains("schtasks") || (l.contains("/create") && l.contains("task"))) { has_schtasks = true; }
+            if !has_powershell && l.contains("powershell") && (l.contains("-enc") || l.contains("-encodedcommand") || l.contains("-nop")) { has_powershell = true; }
+            if !has_cmd && (l.contains("cmd.exe") || l.contains("cmd /c")) && l.len() > 6 { has_cmd = true; }
+            if !has_temp_path && (l.contains("%temp%") || l.contains("%appdata%") || l.contains("\\temp\\") || l.contains("/tmp/")) { has_temp_path = true; }
+            if !has_shadow_copy && (l.contains("vssadmin") || l.contains("shadowcopy")) { has_shadow_copy = true; }
+            if !has_named_pipe && (s.starts_with("\\\\.\\pipe\\") || s.starts_with("\\\\\\\\")) { has_named_pipe = true; }
+            if !has_amsi && (l.contains("amsi.dll") || l.contains("amsiscanbuffer")) { has_amsi = true; }
+            if !has_onion && s.contains(".onion") { has_onion = true; }
+            if has_run_key && has_lsass && has_schtasks && has_powershell && has_cmd
+                && has_temp_path && has_shadow_copy && has_named_pipe && has_amsi && has_onion { break; }
         }
 
-        // PowerShell encoded command (common stager)
-        if string_vals.iter().any(|s| {
-            let l = s.to_ascii_lowercase();
-            l.contains("powershell") && (l.contains("-enc") || l.contains("-encodedcommand") || l.contains("-nop"))
-        }) {
-            f!(Severity::Critical, "Strings", "PowerShell encoded/no-profile command — likely stager [T1059.001]");
-        }
-
-        // cmd /c execution
-        if string_vals.iter().any(|s| {
-            let l = s.to_ascii_lowercase();
-            (l.contains("cmd.exe") || l.contains("cmd /c") || l.contains("cmd.exe /c")) && l.len() > 6
-        }) {
-            f!(Severity::Warn, "Strings", "cmd.exe execution string — command execution [T1059.003]");
-        }
-
-        // Temp/shadow drop paths
-        if string_vals.iter().any(|s| {
-            let l = s.to_ascii_lowercase();
-            l.contains("%temp%") || l.contains("%appdata%") || l.contains("\\temp\\") || l.contains("/tmp/")
-        }) {
-            f!(Severity::Warn, "Strings", "Temp/AppData path in strings — possible dropper staging [T1027]");
-        }
-
-        // Volume shadow copy deletion (ransomware tell)
-        if string_vals.iter().any(|s| {
-            let l = s.to_ascii_lowercase();
-            l.contains("vssadmin") || l.contains("shadowcopy") || l.contains("wmic shadowcopy delete")
-        }) {
-            f!(Severity::Critical, "Strings", "Shadow copy deletion strings — ransomware indicator [T1490]");
-        }
-
-        // Named pipe C2 pattern
-        if string_vals.iter().any(|s| s.starts_with("\\\\.\\pipe\\") || s.starts_with("\\\\\\\\")) {
-            f!(Severity::Warn, "Strings", "Named pipe path in strings — possible C2 or lateral movement channel");
-        }
-
-        // AMSI/ETW patch signatures in strings (in-memory patching)
-        if string_vals.iter().any(|s| {
-            let l = s.to_ascii_lowercase();
-            l.contains("amsi.dll") || l.contains("amsiscanbuffer")
-        }) {
-            f!(Severity::Critical, "Strings", "AMSI DLL/function name in strings — likely in-memory bypass [T1562.001]");
-        }
-
-        // Tor / onion C2
-        if string_vals.iter().any(|s| s.contains(".onion")) {
-            f!(Severity::Critical, "Strings", "Tor .onion address detected — anonymized C2 infrastructure");
-        }
+        if has_run_key    { f!(Severity::Critical, "Strings", "Registry Run key path detected — likely persistence [T1547.001]"); }
+        if has_lsass      { f!(Severity::Critical, "Strings", "LSASS process name in strings — possible credential dumping [T1003.001]"); }
+        if has_schtasks   { f!(Severity::Critical, "Strings", "Scheduled task command in strings — likely persistence [T1053.005]"); }
+        if has_powershell { f!(Severity::Critical, "Strings", "PowerShell encoded/no-profile command — likely stager [T1059.001]"); }
+        if has_cmd        { f!(Severity::Warn,     "Strings", "cmd.exe execution string — command execution [T1059.003]"); }
+        if has_temp_path  { f!(Severity::Warn,     "Strings", "Temp/AppData path in strings — possible dropper staging [T1027]"); }
+        if has_shadow_copy{ f!(Severity::Critical, "Strings", "Shadow copy deletion strings — ransomware indicator [T1490]"); }
+        if has_named_pipe { f!(Severity::Warn,     "Strings", "Named pipe path in strings — possible C2 or lateral movement channel"); }
+        if has_amsi       { f!(Severity::Critical, "Strings", "AMSI DLL/function name in strings — likely in-memory bypass [T1562.001]"); }
+        if has_onion      { f!(Severity::Critical, "Strings", "Tor .onion address detected — anonymized C2 infrastructure"); }
     }
 
     if !pe.checksum_ok {
@@ -548,14 +467,4 @@ pub fn build_heuristic_flags(pe: &PeInfo) -> Vec<HeuristicFlag> {
 
     flags.sort_by(|a, b| b.severity.cmp(&a.severity));
     flags
-}
-
-fn check_api_set(flags: &mut Vec<HeuristicFlag>, all_fns: &HashSet<&str>, cat: &'static str, sev: Severity, apis: &[&str], label: &str) {
-    let matched: Vec<&str> = apis.iter().copied().filter(|a| all_fns.contains(a)).collect();
-    if !matched.is_empty() {
-        flags.push(HeuristicFlag {
-            severity: sev, category: cat,
-            message: format!("{label}: {}", matched.join(", ")),
-        });
-    }
 }
