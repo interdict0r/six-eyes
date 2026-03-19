@@ -333,7 +333,7 @@ fn compute_disasm_lines(pe: &PeInfo, buffer: &[u8], slookup: &SectionLookup) -> 
 
         let instr_ip = instr.ip();
         let rva = (instr_ip - pe.image_base) as u32;
-        let hex_bytes = format_hex_bytes(buffer, &slookup, rva, instr.len());
+        let hex_bytes = format_hex_bytes(buffer, slookup, rva, instr.len());
 
         let fc = instr.flow_control();
         let kind = match InstrKind::from(fc) {
